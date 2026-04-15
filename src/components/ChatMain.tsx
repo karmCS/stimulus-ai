@@ -20,6 +20,11 @@ const threadMessages: Message[] = [
   { id: "10", role: "assistant", text: "A common example is a game engine. The engine itself — the renderer, physics simulation, audio system — is written in C++ for maximum performance. But game designers and level scripters interact with it through a higher-level language like Lua, C#, or a visual scripting system. Unity uses C# as its scripting layer on top of a C++ runtime. Unreal Engine exposes Blueprints alongside C++. This separation lets engineers optimise the critical path while giving creative teams a fast feedback loop without recompiling the entire engine." },
 ];
 
+const MOCK_RESPONSE = "That's a great question. The key insight is that no single paradigm wins everywhere. The best engineers choose tools based on constraints — performance budgets, team expertise, deployment targets, and iteration speed. A startup building a web app will almost always reach for JavaScript or Python first, because time-to-market matters more than microsecond-level performance. A firmware team writing code for a pacemaker will use C or Ada, because correctness and predictability are non-negotiable. The language is a means to an end, not the end itself.";
+
+const CHARS_PER_SECOND = 30;
+const THINKING_DELAY_MS = 1500;
+
 const suggestedPrompts = [
   "Summarise a document",
   "Draft an email",
@@ -35,10 +40,15 @@ interface Props {
 const ChatMain = ({ sidebarCollapsed, onToggleSidebar, activeId }: Props) => {
   const [messages, setMessages] = useState<Message[]>(threadMessages);
   const [composerValue, setComposerValue] = useState("");
+  const [isThinking, setIsThinking] = useState(false);
+  const [streamingText, setStreamingText] = useState("");
+  const [isStreaming, setIsStreaming] = useState(false);
+  const [streamComplete, setStreamComplete] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const isUserScrolledUp = useRef(false);
   const prevMessageCount = useRef(messages.length);
+  const streamIntervalRef = useRef<number | null>(null);
 
   const handleScroll = useCallback(() => {
     const el = scrollRef.current;
@@ -54,12 +64,64 @@ const ChatMain = ({ sidebarCollapsed, onToggleSidebar, activeId }: Props) => {
     prevMessageCount.current = messages.length;
   }, [messages]);
 
+  // Auto-scroll during streaming
+  useEffect(() => {
+    if ((isStreaming || isThinking) && !isUserScrolledUp.current) {
+      bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [streamingText, isThinking, isStreaming]);
+
+  // Cleanup interval on unmount
+  useEffect(() => {
+    return () => {
+      if (streamIntervalRef.current) clearInterval(streamIntervalRef.current);
+    };
+  }, []);
+
+  const startStream = useCallback(() => {
+    setIsThinking(false);
+    setIsStreaming(true);
+    setStreamingText("");
+
+    let index = 0;
+    const interval = 1000 / CHARS_PER_SECOND;
+
+    streamIntervalRef.current = window.setInterval(() => {
+      index++;
+      if (index >= MOCK_RESPONSE.length) {
+        setStreamingText(MOCK_RESPONSE);
+        if (streamIntervalRef.current) clearInterval(streamIntervalRef.current);
+        streamIntervalRef.current = null;
+        // Mark stream complete, then commit to messages
+        setStreamComplete(true);
+        setTimeout(() => {
+          setIsStreaming(false);
+          setStreamComplete(false);
+          setStreamingText("");
+          setMessages((prev) => [
+            ...prev,
+            { id: Date.now().toString(), role: "assistant", text: MOCK_RESPONSE },
+          ]);
+        }, 400);
+      } else {
+        setStreamingText(MOCK_RESPONSE.slice(0, index));
+      }
+    }, interval);
+  }, []);
+
   const handleSend = (text: string) => {
+    if (isThinking || isStreaming) return;
     setMessages((prev) => [
       ...prev,
       { id: Date.now().toString(), role: "user", text },
     ]);
     isUserScrolledUp.current = false;
+
+    // Start thinking phase
+    setIsThinking(true);
+    setTimeout(() => {
+      startStream();
+    }, THINKING_DELAY_MS);
   };
 
   const handleChipClick = (text: string) => {
@@ -149,7 +211,7 @@ const ChatMain = ({ sidebarCollapsed, onToggleSidebar, activeId }: Props) => {
                     />
                   )}
                   <div
-                    className="py-6 message-enter"
+                    className="py-6"
                     style={{
                       animation: "message-enter 400ms cubic-bezier(0.16, 1, 0.3, 1) both",
                     }}
@@ -163,6 +225,60 @@ const ChatMain = ({ sidebarCollapsed, onToggleSidebar, activeId }: Props) => {
                   </div>
                 </div>
               ))}
+
+              {/* Thinking / Streaming turn */}
+              {(isThinking || isStreaming) && (
+                <>
+                  <div
+                    className="w-full my-0"
+                    style={{ height: 1, backgroundColor: "rgba(26,26,26,0.08)" }}
+                  />
+                  <div className="py-6">
+                    <span className="font-mono text-[11px] text-text-muted block mb-2">
+                      Assistant
+                    </span>
+
+                    {isThinking && !isStreaming && (
+                      <span
+                        className="font-body text-[13px]"
+                        style={{
+                          color: "#7A7065",
+                          animation: "shimmer 1.4s linear infinite",
+                        }}
+                      >
+                        Thinking
+                      </span>
+                    )}
+
+                    {isStreaming && (
+                      <p
+                        className="font-body text-[15px] text-text-primary"
+                        style={{
+                          lineHeight: 1.65,
+                          opacity: streamComplete ? 1 : undefined,
+                          animation: streamComplete
+                            ? "message-enter 400ms cubic-bezier(0.16, 1, 0.3, 1) both"
+                            : undefined,
+                        }}
+                      >
+                        {streamingText}
+                        {!streamComplete && (
+                          <span
+                            className="inline-block align-baseline ml-px"
+                            style={{
+                              width: 1,
+                              height: "1em",
+                              backgroundColor: "#0E0E0E",
+                              animation: "blink-cursor 500ms step-end infinite",
+                            }}
+                          />
+                        )}
+                      </p>
+                    )}
+                  </div>
+                </>
+              )}
+
               <div ref={bottomRef} />
             </div>
           </div>
