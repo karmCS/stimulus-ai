@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from "react";
+import Composer from "@/components/Composer";
 
 interface Message {
   id: string;
@@ -33,14 +34,12 @@ interface Props {
 
 const ChatMain = ({ sidebarCollapsed, onToggleSidebar, activeId }: Props) => {
   const [messages, setMessages] = useState<Message[]>(threadMessages);
-  const [input, setInput] = useState("");
+  const [composerValue, setComposerValue] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
   const isUserScrolledUp = useRef(false);
   const prevMessageCount = useRef(messages.length);
 
-  // Track whether user has scrolled up
   const handleScroll = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
@@ -48,7 +47,6 @@ const ChatMain = ({ sidebarCollapsed, onToggleSidebar, activeId }: Props) => {
     isUserScrolledUp.current = el.scrollHeight - el.scrollTop - el.clientHeight > threshold;
   }, []);
 
-  // Auto-scroll only if user hasn't scrolled up
   useEffect(() => {
     if (messages.length > prevMessageCount.current && !isUserScrolledUp.current) {
       bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -56,26 +54,16 @@ const ChatMain = ({ sidebarCollapsed, onToggleSidebar, activeId }: Props) => {
     prevMessageCount.current = messages.length;
   }, [messages]);
 
-  const handleSend = () => {
-    if (!input.trim()) return;
+  const handleSend = (text: string) => {
     setMessages((prev) => [
       ...prev,
-      { id: Date.now().toString(), role: "user", text: input.trim() },
+      { id: Date.now().toString(), role: "user", text },
     ]);
-    setInput("");
     isUserScrolledUp.current = false;
   };
 
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      handleSend();
-    }
-  };
-
   const handleChipClick = (text: string) => {
-    setInput(text);
-    setTimeout(() => textareaRef.current?.focus(), 0);
+    setComposerValue(text);
   };
 
   const showEmptyState = !activeId;
@@ -119,31 +107,14 @@ const ChatMain = ({ sidebarCollapsed, onToggleSidebar, activeId }: Props) => {
             </div>
           </div>
 
-          <div className="border-t border-divider px-8 py-4">
-            <div className="mx-auto flex items-end gap-3" style={{ maxWidth: 720 }}>
-              <textarea
-                ref={textareaRef}
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                onKeyDown={handleKeyDown}
-                placeholder="Write something…"
-                rows={1}
-                className="flex-1 resize-none bg-transparent font-body text-[15px] text-text-primary placeholder:text-text-muted py-2 border-b border-divider focus:border-bronze transition-colors outline-none"
-                style={{ minHeight: 40, maxHeight: 120 }}
-              />
-              <button
-                onClick={handleSend}
-                disabled={!input.trim()}
-                className="font-body text-[13px] font-medium uppercase tracking-[0.08em] text-bronze hover:text-text-primary disabled:text-text-muted disabled:cursor-default transition-colors pb-2"
-              >
-                Send
-              </button>
-            </div>
-          </div>
+          <Composer
+            onSend={handleSend}
+            initialValue={composerValue}
+            onValueChange={setComposerValue}
+          />
         </>
       ) : (
         <>
-          {/* Thread header */}
           {sidebarCollapsed && (
             <header className="flex items-center px-8 py-5">
               <button
@@ -155,7 +126,6 @@ const ChatMain = ({ sidebarCollapsed, onToggleSidebar, activeId }: Props) => {
             </header>
           )}
 
-          {/* Thread */}
           <div
             ref={scrollRef}
             onScroll={handleScroll}
@@ -197,27 +167,7 @@ const ChatMain = ({ sidebarCollapsed, onToggleSidebar, activeId }: Props) => {
             </div>
           </div>
 
-          {/* Composer */}
-          <div className="border-t border-divider px-8 py-4">
-            <div className="mx-auto flex items-end gap-3" style={{ maxWidth: 720 }}>
-              <textarea
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                onKeyDown={handleKeyDown}
-                placeholder="Write something…"
-                rows={1}
-                className="flex-1 resize-none bg-transparent font-body text-[15px] text-text-primary placeholder:text-text-muted py-2 border-b border-divider focus:border-bronze transition-colors outline-none"
-                style={{ minHeight: 40, maxHeight: 120 }}
-              />
-              <button
-                onClick={handleSend}
-                disabled={!input.trim()}
-                className="font-body text-[13px] font-medium uppercase tracking-[0.08em] text-bronze hover:text-text-primary disabled:text-text-muted disabled:cursor-default transition-colors pb-2"
-              >
-                Send
-              </button>
-            </div>
-          </div>
+          <Composer onSend={handleSend} />
         </>
       )}
     </div>
