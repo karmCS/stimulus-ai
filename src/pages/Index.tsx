@@ -5,7 +5,7 @@ import FilmGrain from "@/components/FilmGrain";
 
 const Index = () => {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const [activeConversation, setActiveConversation] = useState("1");
+  const [activeConversation, setActiveConversation] = useState<string | null>(null);
 
   const toggleSidebar = () => setSidebarCollapsed((prev) => !prev);
 
@@ -22,6 +22,7 @@ const Index = () => {
         <ChatMain
           sidebarCollapsed={sidebarCollapsed}
           onToggleSidebar={toggleSidebar}
+          activeId={activeConversation}
         />
       </div>
     </>
