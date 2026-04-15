@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import Composer from "@/components/Composer";
+import MessageActions from "@/components/MessageActions";
 
 interface Message {
   id: string;
@@ -124,6 +125,17 @@ const ChatMain = ({ sidebarCollapsed, onToggleSidebar, activeId }: Props) => {
     }, THINKING_DELAY_MS);
   };
 
+  const handleRegenerate = useCallback((messageId: string) => {
+    if (isThinking || isStreaming) return;
+    // Remove the assistant message to regenerate
+    setMessages((prev) => prev.filter((m) => m.id !== messageId));
+    isUserScrolledUp.current = false;
+    setIsThinking(true);
+    setTimeout(() => {
+      startStream();
+    }, THINKING_DELAY_MS);
+  }, [isThinking, isStreaming, startStream]);
+
   const handleChipClick = (text: string) => {
     setComposerValue(text);
   };
@@ -211,11 +223,17 @@ const ChatMain = ({ sidebarCollapsed, onToggleSidebar, activeId }: Props) => {
                     />
                   )}
                   <div
-                    className="py-6"
+                    className="py-6 relative"
                     style={{
                       animation: "message-enter 400ms cubic-bezier(0.16, 1, 0.3, 1) both",
                     }}
                   >
+                    {msg.role === "assistant" && (
+                      <MessageActions
+                        text={msg.text}
+                        onRegenerate={() => handleRegenerate(msg.id)}
+                      />
+                    )}
                     <span className="font-mono text-[11px] text-text-muted block mb-2">
                       {msg.role === "user" ? "You" : "Assistant"}
                     </span>
