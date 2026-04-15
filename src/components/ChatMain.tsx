@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import Composer from "@/components/Composer";
 import MessageActions from "@/components/MessageActions";
+import { ask } from "@/lib/ask";
 
 interface Message {
   id: string;
@@ -8,22 +9,6 @@ interface Message {
   text: string;
 }
 
-const threadMessages: Message[] = [
-  { id: "1", role: "user", text: "Can you explain the difference between a compiler and an interpreter?" },
-  { id: "2", role: "assistant", text: "A compiler translates an entire program into machine code before execution begins. The output is a standalone binary that runs directly on the hardware. An interpreter, by contrast, reads and executes code line by line at runtime, translating each statement on the fly. Compiled languages tend to run faster because the translation step happens once, ahead of time. Interpreted languages offer more flexibility — you can modify and re-run code without a separate build step, which makes them well-suited to scripting, prototyping, and interactive development." },
-  { id: "3", role: "user", text: "What about JIT compilation? Where does that fit?" },
-  { id: "4", role: "assistant", text: "Just-in-time compilation sits between the two. The program starts in an interpreted or bytecode form, and the runtime selectively compiles hot paths — the sections of code executed most frequently — into native machine code while the program is running. The Java Virtual Machine and modern JavaScript engines like V8 both use JIT compilation. The advantage is that the compiler can make optimisations based on actual runtime behaviour, such as inlining functions that are called repeatedly or de-optimising code paths that turn out to be rarely used. This gives you much of the performance benefit of ahead-of-time compilation while preserving the portability and developer experience of an interpreted language. The tradeoff is startup latency: the JIT compiler needs time to observe patterns before it can begin optimising, which is why JIT-compiled programs sometimes feel slower during their first few seconds of execution compared to a fully compiled binary. Over longer-running processes, however, the JIT can actually outperform static compilation because it has access to information that a static compiler cannot know — things like the actual data types flowing through a function, branch prediction statistics, and memory access patterns specific to the current workload. Modern JIT compilers also employ tiered compilation strategies, where code begins in a fast interpreter, graduates to a baseline compiler, and only reaches the optimising compiler if it proves to be genuinely performance-critical. This approach minimises the overhead of compilation while still capturing the most impactful optimisations where they matter most." },
-  { id: "5", role: "user", text: "So is TypeScript compiled or interpreted?" },
-  { id: "6", role: "assistant", text: "TypeScript is transpiled — its compiler converts TypeScript source code into JavaScript, which is then interpreted or JIT-compiled by a JavaScript engine. The TypeScript compiler itself performs type checking and removes type annotations, but it doesn't produce machine code. The resulting JavaScript runs in whatever environment you target: a browser's V8 engine, Node.js, Deno, or Bun." },
-  { id: "7", role: "user", text: "That makes sense. What's the practical takeaway for choosing a language?" },
-  { id: "8", role: "assistant", text: "Choose based on the constraints of the problem. Systems programming — operating systems, game engines, embedded devices — benefits from compiled languages like C, C++, or Rust where you need predictable performance and fine-grained memory control. Application development, scripting, and web work favours interpreted or JIT-compiled languages like Python, JavaScript, or Ruby where developer velocity and ecosystem matter more than raw throughput. Many modern projects use both: a compiled core for performance-sensitive work and a scripting layer for configuration, orchestration, and rapid iteration." },
-  { id: "9", role: "user", text: "Can you give me an example of that hybrid approach?" },
-  { id: "10", role: "assistant", text: "A common example is a game engine. The engine itself — the renderer, physics simulation, audio system — is written in C++ for maximum performance. But game designers and level scripters interact with it through a higher-level language like Lua, C#, or a visual scripting system. Unity uses C# as its scripting layer on top of a C++ runtime. Unreal Engine exposes Blueprints alongside C++. This separation lets engineers optimise the critical path while giving creative teams a fast feedback loop without recompiling the entire engine." },
-];
-
-const MOCK_RESPONSE = "That's a great question. The key insight is that no single paradigm wins everywhere. The best engineers choose tools based on constraints — performance budgets, team expertise, deployment targets, and iteration speed. A startup building a web app will almost always reach for JavaScript or Python first, because time-to-market matters more than microsecond-level performance. A firmware team writing code for a pacemaker will use C or Ada, because correctness and predictability are non-negotiable. The language is a means to an end, not the end itself.";
-
-const CHARS_PER_SECOND = 30;
 const THINKING_DELAY_MS = 1500;
 
 const suggestedPrompts = [
@@ -39,8 +24,9 @@ interface Props {
 }
 
 const ChatMain = ({ sidebarCollapsed, onToggleSidebar, activeId }: Props) => {
-  const [messages, setMessages] = useState<Message[]>(threadMessages);
+  const [messages, setMessages] = useState<Message[]>([]);
   const [composerValue, setComposerValue] = useState("");
+  const [hasStartedChat, setHasStartedChat] = useState(false);
   const [isThinking, setIsThinking] = useState(false);
   const [streamingText, setStreamingText] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
@@ -49,7 +35,7 @@ const ChatMain = ({ sidebarCollapsed, onToggleSidebar, activeId }: Props) => {
   const bottomRef = useRef<HTMLDivElement>(null);
   const isUserScrolledUp = useRef(false);
   const prevMessageCount = useRef(messages.length);
-  const streamIntervalRef = useRef<number | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
 
   const handleScroll = useCallback(() => {
     const el = scrollRef.current;
@@ -72,45 +58,84 @@ const ChatMain = ({ sidebarCollapsed, onToggleSidebar, activeId }: Props) => {
     }
   }, [streamingText, isThinking, isStreaming]);
 
-  // Cleanup interval on unmount
+  // Cleanup in-flight stream on unmount
   useEffect(() => {
     return () => {
-      if (streamIntervalRef.current) clearInterval(streamIntervalRef.current);
+      abortRef.current?.abort();
     };
   }, []);
 
-  const startStream = useCallback(() => {
-    setIsThinking(false);
-    setIsStreaming(true);
+  const streamAnswer = useCallback(async (question: string) => {
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    setIsThinking(true);
+    setIsStreaming(false);
+    setStreamComplete(false);
     setStreamingText("");
 
-    let index = 0;
-    const interval = 1000 / CHARS_PER_SECOND;
+    try {
+      const stream = ask(question, { signal: controller.signal });
+      const reader = stream.getReader();
+      const decoder = new TextDecoder();
 
-    streamIntervalRef.current = window.setInterval(() => {
-      index++;
-      if (index >= MOCK_RESPONSE.length) {
-        setStreamingText(MOCK_RESPONSE);
-        if (streamIntervalRef.current) clearInterval(streamIntervalRef.current);
-        streamIntervalRef.current = null;
-        // Mark stream complete, then commit to messages
-        setStreamComplete(true);
-        setTimeout(() => {
-          setIsStreaming(false);
-          setStreamComplete(false);
-          setStreamingText("");
-          setMessages((prev) => [
-            ...prev,
-            { id: Date.now().toString(), role: "assistant", text: MOCK_RESPONSE },
-          ]);
-        }, 400);
-      } else {
-        setStreamingText(MOCK_RESPONSE.slice(0, index));
+      let fullText = "";
+      let started = false;
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        if (!value) continue;
+
+        if (!started) {
+          started = true;
+          setIsThinking(false);
+          setIsStreaming(true);
+        }
+
+        const chunkText = decoder.decode(value, { stream: true });
+        if (!chunkText) continue;
+
+        fullText += chunkText;
+
+        // Update UI character-by-character as chunks arrive
+        for (const ch of chunkText) {
+          setStreamingText((prev) => prev + ch);
+        }
       }
-    }, interval);
+
+      setStreamComplete(true);
+      setTimeout(() => {
+        setIsStreaming(false);
+        setStreamComplete(false);
+        setStreamingText("");
+        setMessages((prev) => [
+          ...prev,
+          { id: Date.now().toString(), role: "assistant", text: fullText },
+        ]);
+      }, 400);
+    } catch (err) {
+      if ((err as any)?.name === "AbortError") return;
+      setIsThinking(false);
+      setIsStreaming(false);
+      setStreamComplete(false);
+      setStreamingText("");
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: Date.now().toString(),
+          role: "assistant",
+          text: "Sorry — I couldn't reach the server right now. Please try again.",
+        },
+      ]);
+    } finally {
+      if (abortRef.current === controller) abortRef.current = null;
+    }
   }, []);
 
   const handleSend = (text: string) => {
+    setHasStartedChat(true);
     if (isThinking || isStreaming) return;
     setMessages((prev) => [
       ...prev,
@@ -121,7 +146,7 @@ const ChatMain = ({ sidebarCollapsed, onToggleSidebar, activeId }: Props) => {
     // Start thinking phase
     setIsThinking(true);
     setTimeout(() => {
-      startStream();
+      streamAnswer(text);
     }, THINKING_DELAY_MS);
   };
 
@@ -132,15 +157,16 @@ const ChatMain = ({ sidebarCollapsed, onToggleSidebar, activeId }: Props) => {
     isUserScrolledUp.current = false;
     setIsThinking(true);
     setTimeout(() => {
-      startStream();
+      const lastUser = [...messages].reverse().find((m) => m.role === "user")?.text;
+      if (lastUser) streamAnswer(lastUser);
     }, THINKING_DELAY_MS);
-  }, [isThinking, isStreaming, startStream]);
+  }, [isThinking, isStreaming, messages, streamAnswer]);
 
   const handleChipClick = (text: string) => {
     setComposerValue(text);
   };
 
-  const showEmptyState = !activeId;
+  const showEmptyState = !hasStartedChat;
 
   return (
     <div className="flex-1 flex flex-col h-screen" style={{ backgroundColor: "var(--color-page-bg)", transition: "flex 280ms cubic-bezier(0.16, 1, 0.3, 1)" }}>

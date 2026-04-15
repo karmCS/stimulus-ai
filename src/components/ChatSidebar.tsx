@@ -9,28 +9,7 @@ interface Section {
   items: Conversation[];
 }
 
-const sections: Section[] = [
-  {
-    label: "Today",
-    items: [
-      { id: "1", title: "Summarise my last three meetings", timestamp: "2:14 PM" },
-      { id: "2", title: "Draft a cold email for a new client", timestamp: "11:30 AM" },
-    ],
-  },
-  {
-    label: "Yesterday",
-    items: [
-      { id: "3", title: "Explain transformer architecture simply", timestamp: "4:52 PM" },
-    ],
-  },
-  {
-    label: "Past 7 Days",
-    items: [
-      { id: "4", title: "What should I focus on today?", timestamp: "Apr 10" },
-      { id: "5", title: "Rewrite this paragraph more clearly", timestamp: "Apr 9" },
-    ],
-  },
-];
+const sections: Section[] = [];
 
 interface Props {
   collapsed: boolean;
