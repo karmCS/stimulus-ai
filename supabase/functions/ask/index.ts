@@ -87,6 +87,18 @@ function safeJsonParse(text: string): unknown {
   }
 }
 
+function sanitizeJson(text: string): string {
+  // Best-effort cleanup for common LLM JSON issues.
+  // - strip BOM
+  // - normalize smart quotes
+  // - remove trailing commas
+  return text
+    .replace(/^\uFEFF/, "")
+    .replace(/[“”]/g, "\"")
+    .replace(/[‘’]/g, "'")
+    .replace(/,\s*([}\]])/g, "$1");
+}
+
 function extractFirstJsonObject(text: string): string | null {
   const trimmed = text.trim();
   const fenceMatch = trimmed.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
@@ -117,6 +129,55 @@ function extractFirstJsonObject(text: string): string | null {
     }
     if (ch === "{") depth++;
     if (ch === "}") {
+      depth--;
+      if (depth === 0) return candidate.slice(start, i + 1);
+    }
+  }
+  return null;
+}
+
+function extractFirstJsonValue(text: string): string | null {
+  const trimmed = text.trim();
+  const fenceMatch = trimmed.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+  const candidate = (fenceMatch?.[1]?.trim() ?? trimmed).trim();
+
+  // Fast path: whole candidate is a JSON value
+  if (
+    (candidate.startsWith("{") && candidate.endsWith("}")) ||
+    (candidate.startsWith("[") && candidate.endsWith("]"))
+  ) {
+    return candidate;
+  }
+
+  const firstObj = candidate.indexOf("{");
+  const firstArr = candidate.indexOf("[");
+  if (firstObj === -1 && firstArr === -1) return null;
+
+  const start = firstObj === -1 ? firstArr : firstArr === -1 ? firstObj : Math.min(firstObj, firstArr);
+  const openChar = candidate[start];
+  const closeChar = openChar === "{" ? "}" : "]";
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < candidate.length; i++) {
+    const ch = candidate[i];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (ch === "\\") {
+        escaped = true;
+      } else if (ch === "\"") {
+        inString = false;
+      }
+      continue;
+    }
+    if (ch === "\"") {
+      inString = true;
+      continue;
+    }
+    if (ch === openChar) depth++;
+    if (ch === closeChar) {
       depth--;
       if (depth === 0) return candidate.slice(start, i + 1);
     }
@@ -173,6 +234,7 @@ async function callAgentJSON<T extends object>(opts: {
   outputSchemaHint: string;
   instructions: string;
   temperature?: number;
+  maxTokens?: number;
 }): Promise<{ output: T; rawText: string }> {
   const system =
     `You are ${opts.agentName}.\n` +
@@ -183,7 +245,11 @@ async function callAgentJSON<T extends object>(opts: {
     "- Do NOT include chain-of-thought.\n" +
     "- Do NOT generate any final UI prose unless explicitly asked.\n\n" +
     "Output JSON schema (hint):\n" +
-    opts.outputSchemaHint;
+    opts.outputSchemaHint +
+    "\n\nReturn format requirements:\n" +
+    "- Start your response with `{` and end with `}`.\n" +
+    "- Use double quotes for all JSON strings.\n" +
+    "- No trailing commas.\n";
 
   const user = JSON.stringify(opts.input ?? {}, null, 2);
   const rawText = await anthropicMessageText({
@@ -191,18 +257,22 @@ async function callAgentJSON<T extends object>(opts: {
     model: opts.model,
     system,
     user,
-    maxTokens: 900,
+    maxTokens: opts.maxTokens ?? 900,
     temperature: opts.temperature ?? 0.2,
   });
 
-  const jsonText = extractFirstJsonObject(rawText);
-  const parsed = jsonText ? safeJsonParse(jsonText) : undefined;
+  const jsonText = extractFirstJsonValue(rawText);
+  const parsed = jsonText ? safeJsonParse(sanitizeJson(jsonText)) : undefined;
   if (isRecord(parsed)) return { output: parsed as T, rawText };
+  if (Array.isArray(parsed) && opts.agentName === "ClaimExtractor") {
+    return { output: { claims: parsed } as any as T, rawText };
+  }
 
   const repairSystem =
     `You are ${opts.agentName}.\n` +
     "Your previous output was not valid JSON.\n" +
-    "Return ONLY valid JSON matching the schema. No markdown.\n\n" +
+    "Return ONLY valid JSON matching the schema. No markdown.\n" +
+    "Start with `{` and end with `}`. No trailing commas.\n\n" +
     "Schema (hint):\n" +
     opts.outputSchemaHint;
   const repairUser =
@@ -213,13 +283,46 @@ async function callAgentJSON<T extends object>(opts: {
     model: opts.model,
     system: repairSystem,
     user: repairUser,
-    maxTokens: 900,
+    maxTokens: opts.maxTokens ?? 900,
     temperature: 0,
   });
-  const repairedJsonText = extractFirstJsonObject(repaired);
-  const repairedParsed = repairedJsonText ? safeJsonParse(repairedJsonText) : undefined;
+  const repairedJsonText = extractFirstJsonValue(repaired);
+  const repairedParsed = repairedJsonText ? safeJsonParse(sanitizeJson(repairedJsonText)) : undefined;
   if (!isRecord(repairedParsed)) {
-    throw new Error(`${opts.agentName} did not return valid JSON after repair`);
+    // Same array-wrap fallback for ClaimExtractor.
+    if (Array.isArray(repairedParsed) && opts.agentName === "ClaimExtractor") {
+      return { output: { claims: repairedParsed } as any as T, rawText: repaired };
+    }
+    // One extra repair attempt for ClaimExtractor: force a smaller output that fits.
+    if (opts.agentName === "ClaimExtractor") {
+      const repairSystem2 =
+        "You are ClaimExtractor.\n" +
+        "Return ONLY valid JSON. Start with `{` and end with `}`.\n" +
+        "If the previous output was too long, DROP extra items until it is complete.\n" +
+        "No trailing commas.\n\n" +
+        "Schema (hint):\n" +
+        opts.outputSchemaHint;
+      const repairUser2 =
+        "Rewrite the claims list to a maximum of 8 items and ensure the JSON is complete and valid.\n\n" +
+        rawText;
+      const repaired2 = await anthropicMessageText({
+        apiKey: opts.apiKey,
+        model: opts.model,
+        system: repairSystem2,
+        user: repairUser2,
+        maxTokens: opts.maxTokens ?? 900,
+        temperature: 0,
+      });
+      const repaired2JsonText = extractFirstJsonValue(repaired2);
+      const repaired2Parsed = repaired2JsonText ? safeJsonParse(sanitizeJson(repaired2JsonText)) : undefined;
+      if (isRecord(repaired2Parsed)) return { output: repaired2Parsed as T, rawText: repaired2 };
+      if (Array.isArray(repaired2Parsed)) return { output: { claims: repaired2Parsed } as any as T, rawText: repaired2 };
+      const snippet2 = repaired2.slice(0, 4000);
+      throw new Error(`${opts.agentName} did not return valid JSON after repair. RAW_OUTPUT:\n${snippet2}`);
+    }
+
+    const snippet = repaired.slice(0, 4000);
+    throw new Error(`${opts.agentName} did not return valid JSON after repair. RAW_OUTPUT:\n${snippet}`);
   }
   return { output: repairedParsed as T, rawText: repaired };
 }
@@ -397,7 +500,7 @@ Deno.serve(async (req) => {
         send("stage", { runId, stage: args.agentName, status: "started" });
         const started = Date.now();
         try {
-          const { output } = await callAgentJSON<T>(args);
+          const { output, rawText } = await callAgentJSON<T>(args);
           await logStep({
             agentName: args.agentName,
             input: args.input,
@@ -724,11 +827,12 @@ Deno.serve(async (req) => {
       model,
       agentName: "ClaimExtractor",
       instructions:
-        "Convert findings into atomic, conservatively worded claims. Each claim must cite source labels. No narrative.",
+        "Convert findings into atomic, conservatively worded claims. Each claim must cite source labels. No narrative. Return a maximum of 8 claims.",
       outputSchemaHint:
         '{ "claims": [{ "claim": "Atomic claim...", "confidence": "medium", "source_labels": ["Author (Year)"] }] }',
       input: { evidence, practical, limitations, rankedSources, intent },
-      temperature: 0.1,
+      temperature: 0,
+      maxTokens: 1200,
     });
     state.claims = claims.claims;
 

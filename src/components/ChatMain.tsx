@@ -99,7 +99,8 @@ const ChatMain = ({ sidebarCollapsed, onToggleSidebar, activeId }: Props) => {
           }
 
           if (evt.event === "error") {
-            finalText = "Sorry — I couldn't reach the server right now. Please try again.";
+            const msg = (evt.data as any)?.message;
+            finalText = `Server error${msg ? `: ${msg}` : ""}`;
             return;
           }
 
@@ -130,6 +131,13 @@ const ChatMain = ({ sidebarCollapsed, onToggleSidebar, activeId }: Props) => {
       }, 250);
     } catch (err) {
       if ((err as any)?.name === "AbortError") return;
+      console.error("ask() failed", err);
+      const msg =
+        err instanceof Error
+          ? err.message
+          : typeof err === "string"
+            ? err
+            : "Unknown error";
       setIsThinking(false);
       setIsStreaming(false);
       setStreamComplete(false);
@@ -139,7 +147,7 @@ const ChatMain = ({ sidebarCollapsed, onToggleSidebar, activeId }: Props) => {
         {
           id: Date.now().toString(),
           role: "assistant",
-          text: "Sorry — I couldn't reach the server right now. Please try again.",
+          text: `Couldn't reach the server: ${msg}`,
         },
       ]);
     } finally {

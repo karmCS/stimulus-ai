@@ -46,6 +46,7 @@ export function ask(
     const decoder = new TextDecoder();
     let buffer = "";
     let currentEvent: string | null = null;
+    let sawTerminalEvent = false;
 
     const emit = (event: string | null, dataLine: string) => {
       if (!event) return;
@@ -58,12 +59,15 @@ export function ask(
         // keep as string
       }
       onEvent?.({ event: event as any, data });
+      if (event === "final" || event === "error") sawTerminalEvent = true;
     };
 
     while (true) {
       const { value, done } = await reader.read();
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
+      // Normalize CRLF so we can parse consistently in browsers.
+      buffer = buffer.replace(/\r\n/g, "\n");
 
       let idx: number;
       while ((idx = buffer.indexOf("\n\n")) !== -1) {
@@ -75,6 +79,17 @@ export function ask(
           if (line.startsWith("event:")) currentEvent = line.slice("event:".length).trim();
           if (line.startsWith("data:")) emit(currentEvent, line.slice("data:".length));
         }
+      }
+
+      // Once we see final/error, stop reading to avoid hanging
+      // on servers/proxies that keep the connection open.
+      if (sawTerminalEvent) {
+        try {
+          await reader.cancel();
+        } catch {
+          // ignore
+        }
+        break;
       }
     }
   })();
