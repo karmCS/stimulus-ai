@@ -2,19 +2,21 @@ import { useState, useRef, useEffect, useCallback } from "react";
 import Composer from "@/components/Composer";
 import MessageActions from "@/components/MessageActions";
 import { ask } from "@/lib/ask";
+import AnswerCard, { type Answer } from "@/components/AnswerCard";
 
 interface Message {
   id: string;
   role: "user" | "assistant";
   text: string;
+  answer?: Answer;
 }
 
 const THINKING_DELAY_MS = 1500;
 
 const suggestedPrompts = [
-  "Summarise a document",
-  "Draft an email",
-  "Explain a concept",
+  "What is creatine?",
+  "Draft an upper lower split",
+  "Explain joint actions",
 ];
 
 interface Props {
@@ -76,34 +78,40 @@ const ChatMain = ({ sidebarCollapsed, onToggleSidebar, activeId }: Props) => {
     setStreamingText("");
 
     try {
-      const stream = ask(question, { signal: controller.signal });
-      const reader = stream.getReader();
-      const decoder = new TextDecoder();
-
-      let fullText = "";
+      let finalText = "";
+      let finalAnswerObj: Answer | null = null;
       let started = false;
 
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        if (!value) continue;
+      await ask(question, {
+        signal: controller.signal,
+        onEvent: (evt) => {
+          if (evt.event === "stage") {
+            if (!started) {
+              started = true;
+              setIsThinking(false);
+              setIsStreaming(true);
+            }
+            const stage = (evt.data as any)?.stage;
+            const status = (evt.data as any)?.status;
+            const label = stage ? `${stage}${status ? ` · ${status}` : ""}` : "Working";
+            setStreamingText(label);
+            return;
+          }
 
-        if (!started) {
-          started = true;
-          setIsThinking(false);
-          setIsStreaming(true);
-        }
+          if (evt.event === "error") {
+            finalText = "Sorry — I couldn't reach the server right now. Please try again.";
+            return;
+          }
 
-        const chunkText = decoder.decode(value, { stream: true });
-        if (!chunkText) continue;
-
-        fullText += chunkText;
-
-        // Update UI character-by-character as chunks arrive
-        for (const ch of chunkText) {
-          setStreamingText((prev) => prev + ch);
-        }
-      }
+          if (evt.event === "final") {
+            const fa = (evt.data as any)?.finalAnswer;
+            if (fa && typeof fa === "object") {
+              finalAnswerObj = fa as Answer;
+              finalText = fa?.oneLineVerdict ?? "";
+            }
+          }
+        },
+      });
 
       setStreamComplete(true);
       setTimeout(() => {
@@ -112,9 +120,14 @@ const ChatMain = ({ sidebarCollapsed, onToggleSidebar, activeId }: Props) => {
         setStreamingText("");
         setMessages((prev) => [
           ...prev,
-          { id: Date.now().toString(), role: "assistant", text: fullText },
+          {
+            id: Date.now().toString(),
+            role: "assistant",
+            text: finalText || "Sorry — something went wrong. Please try again.",
+            answer: finalAnswerObj ?? undefined,
+          },
         ]);
-      }, 400);
+      }, 250);
     } catch (err) {
       if ((err as any)?.name === "AbortError") return;
       setIsThinking(false);
@@ -280,17 +293,25 @@ const ChatMain = ({ sidebarCollapsed, onToggleSidebar, activeId }: Props) => {
                         aria-hidden="true"
                       />
                     </div>
-                    <p
-                      className={msg.role === "user" ? "font-display" : "font-body"}
-                      style={{
-                        fontSize: msg.role === "user" ? 22 : 18,
-                        lineHeight: msg.role === "user" ? 1.45 : 1.75,
-                        color: msg.role === "user" ? "#1a1814" : "#2d2b27",
-                        fontWeight: msg.role === "user" ? 400 : 400,
-                      }}
-                    >
-                      {msg.text}
-                    </p>
+                    {msg.role === "assistant" && msg.answer ? (
+                      <AnswerCard
+                        answer={msg.answer}
+                        onFollowUpClick={(text) => handleChipClick(text)}
+                      />
+                    ) : (
+                      <p
+                        className={msg.role === "user" ? "font-display" : "font-body"}
+                        style={{
+                          fontSize: msg.role === "user" ? 22 : 18,
+                          lineHeight: msg.role === "user" ? 1.45 : 1.75,
+                          color: msg.role === "user" ? "#1a1814" : "#2d2b27",
+                          fontWeight: msg.role === "user" ? 400 : 400,
+                          whiteSpace: "pre-wrap",
+                        }}
+                      >
+                        {msg.text}
+                      </p>
+                    )}
                   </div>
                 </div>
               ))}

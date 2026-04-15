@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from "react";
-import { ArrowUp } from "lucide-react";
+import { ArrowRight } from "lucide-react";
 
 interface ComposerProps {
   onSend: (text: string) => void;
@@ -16,6 +16,7 @@ const MAX_ROWS = 6;
 const Composer = ({ onSend, initialValue, onValueChange, error, onRetry }: ComposerProps) => {
   const [value, setValue] = useState(initialValue ?? "");
   const [sending, setSending] = useState(false);
+  const [isOverflowing, setIsOverflowing] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   // Sync external initialValue changes (e.g. chip clicks)
@@ -31,7 +32,9 @@ const Composer = ({ onSend, initialValue, onValueChange, error, onRetry }: Compo
     if (!ta) return;
     ta.style.height = "auto";
     const maxHeight = LINE_HEIGHT * MAX_ROWS + 16; // 16 for py
-    ta.style.height = Math.min(ta.scrollHeight, maxHeight) + "px";
+    const nextHeight = Math.min(ta.scrollHeight, maxHeight);
+    ta.style.height = nextHeight + "px";
+    setIsOverflowing(ta.scrollHeight > maxHeight + 1);
   }, []);
 
   useEffect(() => {
@@ -66,6 +69,22 @@ const Composer = ({ onSend, initialValue, onValueChange, error, onRetry }: Compo
         backgroundColor: "transparent",
       }}
     >
+      <style>{`
+        .composer-textarea::-webkit-scrollbar {
+          width: 10px;
+        }
+        .composer-textarea::-webkit-scrollbar-track {
+          background: var(--color-page-bg, #f5f1ea);
+        }
+        .composer-textarea::-webkit-scrollbar-thumb {
+          background: rgba(26, 24, 20, 0.18);
+          border-radius: 999px;
+          border: 3px solid var(--color-page-bg, #f5f1ea);
+        }
+        .composer-textarea::-webkit-scrollbar-thumb:hover {
+          background: rgba(26, 24, 20, 0.26);
+        }
+      `}</style>
       <div className="mx-auto flex items-end gap-3" style={{ maxWidth: 720 }}>
         <textarea
           ref={textareaRef}
@@ -75,7 +94,7 @@ const Composer = ({ onSend, initialValue, onValueChange, error, onRetry }: Compo
           disabled={sending}
           placeholder="Send a message"
           rows={MIN_ROWS}
-          className="flex-1 resize-none bg-transparent font-body text-text-primary py-2 outline-none border-none"
+          className="composer-textarea flex-1 resize-none bg-transparent font-body text-text-primary py-2 outline-none border-none"
           style={{
             minHeight: LINE_HEIGHT + 16,
             maxHeight: LINE_HEIGHT * MAX_ROWS + 16,
@@ -83,6 +102,11 @@ const Composer = ({ onSend, initialValue, onValueChange, error, onRetry }: Compo
             fontSize: 17,
             borderBottom: "0.5px solid rgba(0,0,0,0.25)",
             borderRadius: 0,
+            overflowY: isOverflowing ? "auto" : "hidden",
+            scrollbarWidth: isOverflowing ? "thin" : "none",
+            scrollbarColor: isOverflowing
+              ? "rgba(26, 24, 20, 0.22) var(--color-page-bg, #f5f1ea)"
+              : undefined,
           }}
         />
         <div
@@ -99,7 +123,7 @@ const Composer = ({ onSend, initialValue, onValueChange, error, onRetry }: Compo
             className="text-text-primary hover:text-bronze transition-colors duration-150 disabled:text-text-muted"
             aria-label="Send message"
           >
-            <ArrowUp size={18} strokeWidth={1.25} />
+            <ArrowRight size={18} strokeWidth={1.25} />
           </button>
         </div>
       </div>
