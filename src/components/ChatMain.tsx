@@ -223,11 +223,17 @@ const ChatMain = ({ sidebarCollapsed, onToggleSidebar, activeId }: Props) => {
                     />
                   )}
                   <div
-                    className="py-6"
+                    className="py-6 relative"
                     style={{
                       animation: "message-enter 400ms cubic-bezier(0.16, 1, 0.3, 1) both",
                     }}
                   >
+                    {msg.role === "assistant" && (
+                      <MessageActions
+                        text={msg.text}
+                        onRegenerate={() => handleRegenerate(msg.id)}
+                      />
+                    )}
                     <span className="font-mono text-[11px] text-text-muted block mb-2">
                       {msg.role === "user" ? "You" : "Assistant"}
                     </span>
