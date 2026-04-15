@@ -15,15 +15,23 @@ const sampleMessages: Message[] = [
   { id: "5", sender: "other", text: "The quiet is never truly empty. It's where meaning collects before it takes form.", time: "2:14 PM" },
 ];
 
+const suggestedPrompts = [
+  "Summarise a document",
+  "Draft an email",
+  "Explain a concept",
+];
+
 interface Props {
   sidebarCollapsed: boolean;
   onToggleSidebar: () => void;
+  activeId: string | null;
 }
 
-const ChatMain = ({ sidebarCollapsed, onToggleSidebar }: Props) => {
+const ChatMain = ({ sidebarCollapsed, onToggleSidebar, activeId }: Props) => {
   const [messages, setMessages] = useState<Message[]>(sampleMessages);
   const [input, setInput] = useState("");
   const bottomRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -47,70 +55,143 @@ const ChatMain = ({ sidebarCollapsed, onToggleSidebar }: Props) => {
     }
   };
 
+  const handleChipClick = (text: string) => {
+    setInput(text);
+    setTimeout(() => textareaRef.current?.focus(), 0);
+  };
+
+  const showEmptyState = !activeId;
+
   return (
     <div className="flex-1 flex flex-col h-screen" style={{ backgroundColor: "var(--color-page-bg)", transition: "flex 280ms cubic-bezier(0.16, 1, 0.3, 1)" }}>
-      {/* Header */}
-      <header className="flex items-center justify-between px-8 py-5 border-b border-divider">
-        <div className="flex items-center gap-4">
+      {showEmptyState ? (
+        <>
+          {/* Empty state header — just the menu toggle */}
           {sidebarCollapsed && (
-            <button
-              onClick={onToggleSidebar}
-              className="font-body text-[13px] font-medium text-text-muted hover:text-text-primary transition-colors uppercase tracking-[0.08em] mr-2"
-            >
-              Menu
-            </button>
-          )}
-          <h2 className="font-display text-[22px] text-text-primary leading-none">On Solitude</h2>
-        </div>
-        <span className="font-mono text-[12px] text-text-muted">5 messages</span>
-      </header>
-
-      {/* Messages */}
-      <div className="flex-1 overflow-y-auto px-8 py-6">
-        <div className="max-w-2xl mx-auto space-y-6">
-          {messages.map((msg) => (
-            <div key={msg.id} className={`flex flex-col ${msg.sender === "user" ? "items-end" : "items-start"}`}>
-              <div
-                className={`max-w-[85%] px-4 py-3 rounded-sm ${
-                  msg.sender === "user"
-                    ? "bg-sidebar-bg border border-divider"
-                    : ""
-                }`}
+            <header className="flex items-center px-8 py-5">
+              <button
+                onClick={onToggleSidebar}
+                className="font-body text-[13px] font-medium text-text-muted hover:text-text-primary transition-colors uppercase tracking-[0.08em]"
               >
-                <p className="font-body text-[15px] text-text-primary leading-relaxed">
-                  {msg.text}
-                </p>
-              </div>
-              <span className="font-mono text-[11px] text-text-muted mt-1.5 px-1">
-                {msg.time}
-              </span>
-            </div>
-          ))}
-          <div ref={bottomRef} />
-        </div>
-      </div>
+                Menu
+              </button>
+            </header>
+          )}
 
-      {/* Input */}
-      <div className="border-t border-divider px-8 py-4">
-        <div className="max-w-2xl mx-auto flex items-end gap-3">
-          <textarea
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={handleKeyDown}
-            placeholder="Write something…"
-            rows={1}
-            className="flex-1 resize-none bg-transparent font-body text-[15px] text-text-primary placeholder:text-text-muted py-2 border-b border-divider focus:border-bronze transition-colors outline-none"
-            style={{ minHeight: 40, maxHeight: 120 }}
-          />
-          <button
-            onClick={handleSend}
-            disabled={!input.trim()}
-            className="font-body text-[13px] font-medium uppercase tracking-[0.08em] text-bronze hover:text-text-primary disabled:text-text-muted disabled:cursor-default transition-colors pb-2"
-          >
-            Send
-          </button>
-        </div>
-      </div>
+          {/* Centered empty state */}
+          <div className="flex-1 flex items-center justify-center" style={{ padding: "0 10vw" }}>
+            <div className="w-full" style={{ maxWidth: 720 }}>
+              <h1 className="font-display text-[44px] font-normal text-text-primary leading-tight">
+                What's on your mind.
+              </h1>
+              <div className="flex flex-wrap gap-3 mt-6">
+                {suggestedPrompts.map((prompt) => (
+                  <button
+                    key={prompt}
+                    onClick={() => handleChipClick(prompt)}
+                    className="font-body text-[13px] font-normal text-text-secondary px-4 py-2 rounded-sm transition-colors duration-150 hover:bg-page"
+                    style={{
+                      border: "1px solid rgba(26,26,26,0.08)",
+                      backgroundColor: "#F5F1EA",
+                      borderRadius: 4,
+                    }}
+                  >
+                    {prompt}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* Composer */}
+          <div className="border-t border-divider px-8 py-4">
+            <div className="mx-auto flex items-end gap-3" style={{ maxWidth: 720 }}>
+              <textarea
+                ref={textareaRef}
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyDown={handleKeyDown}
+                placeholder="Write something…"
+                rows={1}
+                className="flex-1 resize-none bg-transparent font-body text-[15px] text-text-primary placeholder:text-text-muted py-2 border-b border-divider focus:border-bronze transition-colors outline-none"
+                style={{ minHeight: 40, maxHeight: 120 }}
+              />
+              <button
+                onClick={handleSend}
+                disabled={!input.trim()}
+                className="font-body text-[13px] font-medium uppercase tracking-[0.08em] text-bronze hover:text-text-primary disabled:text-text-muted disabled:cursor-default transition-colors pb-2"
+              >
+                Send
+              </button>
+            </div>
+          </div>
+        </>
+      ) : (
+        <>
+          {/* Header */}
+          <header className="flex items-center justify-between px-8 py-5 border-b border-divider">
+            <div className="flex items-center gap-4">
+              {sidebarCollapsed && (
+                <button
+                  onClick={onToggleSidebar}
+                  className="font-body text-[13px] font-medium text-text-muted hover:text-text-primary transition-colors uppercase tracking-[0.08em] mr-2"
+                >
+                  Menu
+                </button>
+              )}
+              <h2 className="font-display text-[22px] text-text-primary leading-none">On Solitude</h2>
+            </div>
+            <span className="font-mono text-[12px] text-text-muted">5 messages</span>
+          </header>
+
+          {/* Messages */}
+          <div className="flex-1 overflow-y-auto px-8 py-6">
+            <div className="mx-auto space-y-6" style={{ maxWidth: 720 }}>
+              {messages.map((msg) => (
+                <div key={msg.id} className={`flex flex-col ${msg.sender === "user" ? "items-end" : "items-start"}`}>
+                  <div
+                    className={`max-w-[85%] px-4 py-3 rounded-sm ${
+                      msg.sender === "user"
+                        ? "bg-sidebar-bg border border-divider"
+                        : ""
+                    }`}
+                  >
+                    <p className="font-body text-[15px] text-text-primary leading-relaxed">
+                      {msg.text}
+                    </p>
+                  </div>
+                  <span className="font-mono text-[11px] text-text-muted mt-1.5 px-1">
+                    {msg.time}
+                  </span>
+                </div>
+              ))}
+              <div ref={bottomRef} />
+            </div>
+          </div>
+
+          {/* Input */}
+          <div className="border-t border-divider px-8 py-4">
+            <div className="mx-auto flex items-end gap-3" style={{ maxWidth: 720 }}>
+              <textarea
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyDown={handleKeyDown}
+                placeholder="Write something…"
+                rows={1}
+                className="flex-1 resize-none bg-transparent font-body text-[15px] text-text-primary placeholder:text-text-muted py-2 border-b border-divider focus:border-bronze transition-colors outline-none"
+                style={{ minHeight: 40, maxHeight: 120 }}
+              />
+              <button
+                onClick={handleSend}
+                disabled={!input.trim()}
+                className="font-body text-[13px] font-medium uppercase tracking-[0.08em] text-bronze hover:text-text-primary disabled:text-text-muted disabled:cursor-default transition-colors pb-2"
+              >
+                Send
+              </button>
+            </div>
+          </div>
+        </>
+      )}
     </div>
   );
 };
