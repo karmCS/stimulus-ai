@@ -1,19 +1,35 @@
-import { useState } from "react";
-
 interface Conversation {
   id: string;
   title: string;
-  lastMessage: string;
   timestamp: string;
-  unread?: boolean;
 }
 
-const conversations: Conversation[] = [
-  { id: "1", title: "On Solitude", lastMessage: "The quiet is never truly empty…", timestamp: "2:14 PM", unread: true },
-  { id: "2", title: "Material Study", lastMessage: "Linen over silk, always.", timestamp: "Yesterday" },
-  { id: "3", title: "Screenplay Notes", lastMessage: "Act II needs restraint.", timestamp: "Mar 12" },
-  { id: "4", title: "Exhibition Brief", lastMessage: "White walls. Nothing else.", timestamp: "Mar 10" },
-  { id: "5", title: "Travel — Kyoto", lastMessage: "The temple at dawn.", timestamp: "Mar 8" },
+interface Section {
+  label: string;
+  items: Conversation[];
+}
+
+const sections: Section[] = [
+  {
+    label: "Today",
+    items: [
+      { id: "1", title: "Summarise my last three meetings", timestamp: "2:14 PM" },
+      { id: "2", title: "Draft a cold email for a new client", timestamp: "11:30 AM" },
+    ],
+  },
+  {
+    label: "Yesterday",
+    items: [
+      { id: "3", title: "Explain transformer architecture simply", timestamp: "4:52 PM" },
+    ],
+  },
+  {
+    label: "Past 7 Days",
+    items: [
+      { id: "4", title: "What should I focus on today?", timestamp: "Apr 10" },
+      { id: "5", title: "Rewrite this paragraph more clearly", timestamp: "Apr 9" },
+    ],
+  },
 ];
 
 interface Props {
@@ -26,62 +42,85 @@ interface Props {
 const ChatSidebar = ({ collapsed, onToggle, activeId, onSelect }: Props) => {
   return (
     <aside
-      className="h-screen flex-shrink-0 flex flex-col transition-all duration-300 ease-in-out border-r border-divider"
+      className="h-screen flex-shrink-0 flex flex-col border-r border-divider"
       style={{
         width: collapsed ? 0 : 280,
         minWidth: collapsed ? 0 : 280,
-        backgroundColor: "var(--color-sidebar-bg)",
+        backgroundColor: "#F5F1EA",
         overflow: "hidden",
+        transition: "width 280ms cubic-bezier(0.16, 1, 0.3, 1), min-width 280ms cubic-bezier(0.16, 1, 0.3, 1)",
       }}
     >
-      <div className="px-6 pt-8 pb-4 flex items-center justify-between">
-        <h1 className="font-display text-[28px] text-text-primary tracking-tight leading-none">
-          Dialogue
-        </h1>
+      {/* Toggle button */}
+      <div className="flex items-center justify-end px-4 pt-4 pb-1">
         <button
           onClick={onToggle}
-          className="text-text-muted hover:text-text-primary transition-colors font-body text-[13px] font-medium uppercase tracking-[0.08em]"
+          className="text-text-muted hover:text-text-primary transition-colors duration-150"
+          aria-label="Collapse sidebar"
         >
-          Close
+          <svg width="18" height="18" viewBox="0 0 18 18" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M12 4L7 9L12 14" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+          </svg>
         </button>
       </div>
 
-      <div className="px-6 pb-4">
-        <div className="border-b border-divider" />
+      {/* New Chat button */}
+      <div className="border-b" style={{ borderColor: "rgba(26,26,26,0.08)" }}>
+        <button
+          className="w-full text-left px-5 py-3 font-body text-[13px] font-medium text-text-primary hover:bg-page transition-colors duration-150"
+        >
+          New Chat
+        </button>
       </div>
 
-      <nav className="flex-1 overflow-y-auto px-3">
-        {conversations.map((conv) => (
-          <button
-            key={conv.id}
-            onClick={() => onSelect(conv.id)}
-            className={`w-full text-left px-3 py-3 rounded-sm transition-colors duration-150 group ${
-              activeId === conv.id ? "bg-divider" : "hover:bg-divider"
-            }`}
-          >
-            <div className="flex items-baseline justify-between mb-1">
-              <span className="font-body text-[14px] font-medium text-text-primary truncate pr-2">
-                {conv.title}
-              </span>
-              <span className="font-mono text-[11px] text-text-muted whitespace-nowrap">
-                {conv.timestamp}
+      {/* Chat history */}
+      <nav
+        className="flex-1 overflow-y-auto px-3 pt-4"
+        style={{
+          scrollbarWidth: "none",
+          msOverflowStyle: "none",
+        }}
+      >
+        <style>{`nav::-webkit-scrollbar { display: none; }`}</style>
+        {sections.map((section) => (
+          <div key={section.label} className="mb-4">
+            <div className="px-2 pb-2">
+              <span className="font-mono text-[11px] font-normal uppercase tracking-[0.08em] text-bronze">
+                {section.label}
               </span>
             </div>
-            <p className="font-body text-[13px] text-text-muted truncate leading-snug">
-              {conv.lastMessage}
-            </p>
-            {conv.unread && (
-              <div className="w-1.5 h-1.5 rounded-full bg-bronze mt-1.5" />
-            )}
-          </button>
+            {section.items.map((item) => {
+              const isActive = activeId === item.id;
+              return (
+                <button
+                  key={item.id}
+                  onClick={() => onSelect(item.id)}
+                  className="w-full text-left px-2 py-2.5 transition-colors duration-150 group"
+                  style={{
+                    borderLeft: isActive ? "1.5px solid #8B7355" : "1.5px solid transparent",
+                    backgroundColor: "transparent",
+                  }}
+                  onMouseEnter={(e) => {
+                    if (!isActive) e.currentTarget.style.backgroundColor = "#FAF7F2";
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.backgroundColor = "transparent";
+                  }}
+                >
+                  <div className="pl-1.5">
+                    <p className="font-body text-[14px] font-normal text-text-primary truncate leading-snug">
+                      {item.title}
+                    </p>
+                    <span className="font-mono text-[11px] text-text-muted mt-0.5 block">
+                      {item.timestamp}
+                    </span>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
         ))}
       </nav>
-
-      <div className="px-6 py-5">
-        <button className="w-full py-2.5 border border-divider rounded-sm font-body text-[13px] font-medium text-text-secondary hover:text-text-primary hover:border-text-muted transition-colors tracking-[0.02em]">
-          New Conversation
-        </button>
-      </div>
     </aside>
   );
 };

@@ -48,7 +48,7 @@ const ChatMain = ({ sidebarCollapsed, onToggleSidebar }: Props) => {
   };
 
   return (
-    <div className="flex-1 flex flex-col h-screen" style={{ backgroundColor: "var(--color-page-bg)" }}>
+    <div className="flex-1 flex flex-col h-screen" style={{ backgroundColor: "var(--color-page-bg)", transition: "flex 280ms cubic-bezier(0.16, 1, 0.3, 1)" }}>
       {/* Header */}
       <header className="flex items-center justify-between px-8 py-5 border-b border-divider">
         <div className="flex items-center gap-4">
