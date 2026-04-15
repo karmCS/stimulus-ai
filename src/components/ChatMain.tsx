@@ -203,7 +203,7 @@ const ChatMain = ({ sidebarCollapsed, onToggleSidebar, activeId }: Props) => {
           <div
             ref={scrollRef}
             onScroll={handleScroll}
-            className="flex-1 overflow-y-auto"
+            className="flex-1 overflow-y-auto thread-scroll"
             style={{
               scrollbarWidth: "none",
               msOverflowStyle: "none",
@@ -211,7 +211,7 @@ const ChatMain = ({ sidebarCollapsed, onToggleSidebar, activeId }: Props) => {
           >
             <style>{`.thread-scroll::-webkit-scrollbar { display: none; }`}</style>
             <div
-              className="mx-auto thread-scroll"
+              className="mx-auto"
               style={{ maxWidth: 720, paddingTop: 48, paddingBottom: 120 }}
             >
               {messages.map((msg, index) => (
