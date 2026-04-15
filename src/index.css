@@ -78,4 +78,15 @@
     outline: 1.5px solid var(--color-divider);
     outline-offset: 2px;
   }
+
+  @keyframes message-enter {
+    from {
+      opacity: 0;
+      transform: translateY(4px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
 }
