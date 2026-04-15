@@ -125,6 +125,17 @@ const ChatMain = ({ sidebarCollapsed, onToggleSidebar, activeId }: Props) => {
     }, THINKING_DELAY_MS);
   };
 
+  const handleRegenerate = useCallback((messageId: string) => {
+    if (isThinking || isStreaming) return;
+    // Remove the assistant message to regenerate
+    setMessages((prev) => prev.filter((m) => m.id !== messageId));
+    isUserScrolledUp.current = false;
+    setIsThinking(true);
+    setTimeout(() => {
+      startStream();
+    }, THINKING_DELAY_MS);
+  }, [isThinking, isStreaming, startStream]);
+
   const handleChipClick = (text: string) => {
     setComposerValue(text);
   };
