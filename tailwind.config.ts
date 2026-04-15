@@ -14,9 +14,9 @@ export default {
     },
     extend: {
       fontFamily: {
-        display: ["'Antic Didone'", "serif"],
-        body: ["'Inter'", "sans-serif"],
-        mono: ["'JetBrains Mono'", "monospace"],
+        display: ["'Playfair Display'", "serif"],
+        body: ["'EB Garamond'", "serif"],
+        mono: ["'Playfair Display SC'", "serif"],
       },
       colors: {
         page: "#FAF7F2",

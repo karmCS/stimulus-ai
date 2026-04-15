@@ -63,9 +63,7 @@ const Composer = ({ onSend, initialValue, onValueChange, error, onRetry }: Compo
     <div
       className="px-8 py-4"
       style={{
-        backgroundColor: "#FAF7F2",
-        borderTop: `1px solid ${error ? "#8B3A3A" : "rgba(26,26,26,0.08)"}`,
-        transition: "border-color 150ms ease",
+        backgroundColor: "transparent",
       }}
     >
       <div className="mx-auto flex items-end gap-3" style={{ maxWidth: 720 }}>
@@ -77,11 +75,14 @@ const Composer = ({ onSend, initialValue, onValueChange, error, onRetry }: Compo
           disabled={sending}
           placeholder="Send a message"
           rows={MIN_ROWS}
-          className="flex-1 resize-none bg-transparent font-body text-[15px] text-text-primary placeholder:text-text-muted py-2 outline-none border-none"
+          className="flex-1 resize-none bg-transparent font-body text-text-primary py-2 outline-none border-none"
           style={{
             minHeight: LINE_HEIGHT + 16,
             maxHeight: LINE_HEIGHT * MAX_ROWS + 16,
             lineHeight: `${LINE_HEIGHT}px`,
+            fontSize: 17,
+            borderBottom: "0.5px solid rgba(0,0,0,0.25)",
+            borderRadius: 0,
           }}
         />
         <div

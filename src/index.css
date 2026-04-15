@@ -1,4 +1,4 @@
-@import url('https://fonts.googleapis.com/css2?family=Antic+Didone&family=Inter:wght@400;500&family=JetBrains+Mono:wght@400&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=EB+Garamond:ital,wght@0,400;0,500;1,400;1,500&family=Playfair+Display:ital,wght@0,400;0,500;1,400;1,500&family=Playfair+Display+SC:wght@400&display=swap');
 
 @tailwind base;
 @tailwind components;
@@ -45,7 +45,7 @@
     --sidebar-border: 0 0% 10% / 0.08;
     --sidebar-ring: 0 0% 10% / 0.08;
 
-    --color-page-bg: #FAF7F2;
+    --color-page-bg: #F0EDE6;
     --color-sidebar-bg: #F5F1EA;
     --color-text-primary: #0E0E0E;
     --color-text-secondary: #3A3530;
@@ -54,9 +54,9 @@
     --color-accent: #8B7355;
     --color-error: #8B3A3A;
 
-    --font-display: 'Antic Didone', serif;
-    --font-body: 'Inter', sans-serif;
-    --font-mono: 'JetBrains Mono', monospace;
+    --font-display: 'Playfair Display', serif;
+    --font-body: 'EB Garamond', serif;
+    --font-mono: 'Playfair Display SC', serif;
   }
 }
 
@@ -72,6 +72,20 @@
     font-size: 15px;
     line-height: 1.6;
     -webkit-font-smoothing: antialiased;
+  }
+
+  em {
+    font-style: italic;
+  }
+
+  /* Editorial chat styling */
+  .thread-scroll em {
+    color: #1a1814;
+  }
+
+  textarea::placeholder {
+    color: #aaa79f;
+    font-style: italic;
   }
 
   *:focus-visible {

@@ -215,15 +215,17 @@ const ChatMain = ({ sidebarCollapsed, onToggleSidebar, activeId }: Props) => {
               style={{ maxWidth: 720, paddingTop: 48, paddingBottom: 120 }}
             >
               {messages.map((msg, index) => (
-                <div key={msg.id}>
-                  {index > 0 && (
-                    <div
-                      className="w-full my-0"
-                      style={{ height: 1, backgroundColor: "rgba(26,26,26,0.08)" }}
-                    />
-                  )}
+                <div
+                  key={msg.id}
+                  className="relative"
+                  style={{
+                    paddingTop: 56,
+                    paddingBottom: 56,
+                    borderBottom: "0.5px solid rgba(0,0,0,0.12)",
+                  }}
+                >
                   <div
-                    className="py-6 relative"
+                    className="relative"
                     style={{
                       animation: "message-enter 400ms cubic-bezier(0.16, 1, 0.3, 1) both",
                     }}
@@ -234,10 +236,33 @@ const ChatMain = ({ sidebarCollapsed, onToggleSidebar, activeId }: Props) => {
                         onRegenerate={() => handleRegenerate(msg.id)}
                       />
                     )}
-                    <span className="font-mono text-[11px] text-text-muted block mb-2">
-                      {msg.role === "user" ? "You" : "Assistant"}
-                    </span>
-                    <p className="font-body text-[15px] text-text-primary" style={{ lineHeight: 1.65 }}>
+                    <div className="flex items-center gap-3 mb-3">
+                      <span
+                        className="block whitespace-nowrap font-mono"
+                        style={{
+                          fontSize: 9.5,
+                          letterSpacing: "0.22em",
+                          color: "#9a9188",
+                          textTransform: "lowercase",
+                        }}
+                      >
+                        {msg.role === "user" ? "You" : "Assistant"}
+                      </span>
+                      <span
+                        className="block flex-1"
+                        style={{ height: 0.5, backgroundColor: "rgba(0,0,0,0.12)" }}
+                        aria-hidden="true"
+                      />
+                    </div>
+                    <p
+                      className={msg.role === "user" ? "font-display" : "font-body"}
+                      style={{
+                        fontSize: msg.role === "user" ? 22 : 18,
+                        lineHeight: msg.role === "user" ? 1.45 : 1.75,
+                        color: msg.role === "user" ? "#1a1814" : "#2d2b27",
+                        fontWeight: msg.role === "user" ? 400 : 400,
+                      }}
+                    >
                       {msg.text}
                     </p>
                   </div>
@@ -248,19 +273,39 @@ const ChatMain = ({ sidebarCollapsed, onToggleSidebar, activeId }: Props) => {
               {(isThinking || isStreaming) && (
                 <>
                   <div
-                    className="w-full my-0"
-                    style={{ height: 1, backgroundColor: "rgba(26,26,26,0.08)" }}
-                  />
-                  <div className="py-6">
-                    <span className="font-mono text-[11px] text-text-muted block mb-2">
-                      Assistant
-                    </span>
+                    className="relative"
+                    style={{
+                      paddingTop: 56,
+                      paddingBottom: 56,
+                      borderBottom: "0.5px solid rgba(0,0,0,0.12)",
+                    }}
+                  >
+                    <div className="flex items-center gap-3 mb-3">
+                      <span
+                        className="block whitespace-nowrap font-mono"
+                        style={{
+                          fontSize: 9.5,
+                          letterSpacing: "0.22em",
+                          color: "#9a9188",
+                          textTransform: "lowercase",
+                        }}
+                      >
+                        Assistant
+                      </span>
+                      <span
+                        className="block flex-1"
+                        style={{ height: 0.5, backgroundColor: "rgba(0,0,0,0.12)" }}
+                        aria-hidden="true"
+                      />
+                    </div>
 
                     {isThinking && !isStreaming && (
                       <span
-                        className="font-body text-[13px]"
+                        className="font-body"
                         style={{
-                          color: "#7A7065",
+                          fontSize: 18,
+                          lineHeight: 1.75,
+                          color: "#2d2b27",
                           animation: "shimmer 1.4s linear infinite",
                         }}
                       >
@@ -270,9 +315,11 @@ const ChatMain = ({ sidebarCollapsed, onToggleSidebar, activeId }: Props) => {
 
                     {isStreaming && (
                       <p
-                        className="font-body text-[15px] text-text-primary"
+                        className="font-body"
                         style={{
-                          lineHeight: 1.65,
+                          fontSize: 18,
+                          lineHeight: 1.75,
+                          color: "#2d2b27",
                           opacity: streamComplete ? 1 : undefined,
                           animation: streamComplete
                             ? "message-enter 400ms cubic-bezier(0.16, 1, 0.3, 1) both"
@@ -286,7 +333,7 @@ const ChatMain = ({ sidebarCollapsed, onToggleSidebar, activeId }: Props) => {
                             style={{
                               width: 1,
                               height: "1em",
-                              backgroundColor: "#0E0E0E",
+                              backgroundColor: "#1a1814",
                               animation: "blink-cursor 500ms step-end infinite",
                             }}
                           />
