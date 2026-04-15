@@ -1,18 +1,22 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 
 interface Message {
   id: string;
-  sender: "user" | "other";
+  role: "user" | "assistant";
   text: string;
-  time: string;
 }
 
-const sampleMessages: Message[] = [
-  { id: "1", sender: "other", text: "I've been thinking about the relationship between silence and space in film. How absence becomes the loudest presence.", time: "2:08 PM" },
-  { id: "2", sender: "user", text: "That's the entire thesis of the Dreyer retrospective. Every frame is a room someone just left.", time: "2:10 PM" },
-  { id: "3", sender: "other", text: "Exactly. And the clothing in those scenes — always monochrome, always structured. The fabric does the acting when the body is still.", time: "2:11 PM" },
-  { id: "4", sender: "user", text: "There's a Japanese word for it — ma. The charged void. It's not emptiness, it's potential.", time: "2:12 PM" },
-  { id: "5", sender: "other", text: "The quiet is never truly empty. It's where meaning collects before it takes form.", time: "2:14 PM" },
+const threadMessages: Message[] = [
+  { id: "1", role: "user", text: "Can you explain the difference between a compiler and an interpreter?" },
+  { id: "2", role: "assistant", text: "A compiler translates an entire program into machine code before execution begins. The output is a standalone binary that runs directly on the hardware. An interpreter, by contrast, reads and executes code line by line at runtime, translating each statement on the fly. Compiled languages tend to run faster because the translation step happens once, ahead of time. Interpreted languages offer more flexibility — you can modify and re-run code without a separate build step, which makes them well-suited to scripting, prototyping, and interactive development." },
+  { id: "3", role: "user", text: "What about JIT compilation? Where does that fit?" },
+  { id: "4", role: "assistant", text: "Just-in-time compilation sits between the two. The program starts in an interpreted or bytecode form, and the runtime selectively compiles hot paths — the sections of code executed most frequently — into native machine code while the program is running. The Java Virtual Machine and modern JavaScript engines like V8 both use JIT compilation. The advantage is that the compiler can make optimisations based on actual runtime behaviour, such as inlining functions that are called repeatedly or de-optimising code paths that turn out to be rarely used. This gives you much of the performance benefit of ahead-of-time compilation while preserving the portability and developer experience of an interpreted language. The tradeoff is startup latency: the JIT compiler needs time to observe patterns before it can begin optimising, which is why JIT-compiled programs sometimes feel slower during their first few seconds of execution compared to a fully compiled binary. Over longer-running processes, however, the JIT can actually outperform static compilation because it has access to information that a static compiler cannot know — things like the actual data types flowing through a function, branch prediction statistics, and memory access patterns specific to the current workload. Modern JIT compilers also employ tiered compilation strategies, where code begins in a fast interpreter, graduates to a baseline compiler, and only reaches the optimising compiler if it proves to be genuinely performance-critical. This approach minimises the overhead of compilation while still capturing the most impactful optimisations where they matter most." },
+  { id: "5", role: "user", text: "So is TypeScript compiled or interpreted?" },
+  { id: "6", role: "assistant", text: "TypeScript is transpiled — its compiler converts TypeScript source code into JavaScript, which is then interpreted or JIT-compiled by a JavaScript engine. The TypeScript compiler itself performs type checking and removes type annotations, but it doesn't produce machine code. The resulting JavaScript runs in whatever environment you target: a browser's V8 engine, Node.js, Deno, or Bun." },
+  { id: "7", role: "user", text: "That makes sense. What's the practical takeaway for choosing a language?" },
+  { id: "8", role: "assistant", text: "Choose based on the constraints of the problem. Systems programming — operating systems, game engines, embedded devices — benefits from compiled languages like C, C++, or Rust where you need predictable performance and fine-grained memory control. Application development, scripting, and web work favours interpreted or JIT-compiled languages like Python, JavaScript, or Ruby where developer velocity and ecosystem matter more than raw throughput. Many modern projects use both: a compiled core for performance-sensitive work and a scripting layer for configuration, orchestration, and rapid iteration." },
+  { id: "9", role: "user", text: "Can you give me an example of that hybrid approach?" },
+  { id: "10", role: "assistant", text: "A common example is a game engine. The engine itself — the renderer, physics simulation, audio system — is written in C++ for maximum performance. But game designers and level scripters interact with it through a higher-level language like Lua, C#, or a visual scripting system. Unity uses C# as its scripting layer on top of a C++ runtime. Unreal Engine exposes Blueprints alongside C++. This separation lets engineers optimise the critical path while giving creative teams a fast feedback loop without recompiling the entire engine." },
 ];
 
 const suggestedPrompts = [
@@ -28,24 +32,38 @@ interface Props {
 }
 
 const ChatMain = ({ sidebarCollapsed, onToggleSidebar, activeId }: Props) => {
-  const [messages, setMessages] = useState<Message[]>(sampleMessages);
+  const [messages, setMessages] = useState<Message[]>(threadMessages);
   const [input, setInput] = useState("");
+  const scrollRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const isUserScrolledUp = useRef(false);
+  const prevMessageCount = useRef(messages.length);
 
+  // Track whether user has scrolled up
+  const handleScroll = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const threshold = 80;
+    isUserScrolledUp.current = el.scrollHeight - el.scrollTop - el.clientHeight > threshold;
+  }, []);
+
+  // Auto-scroll only if user hasn't scrolled up
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    if (messages.length > prevMessageCount.current && !isUserScrolledUp.current) {
+      bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    }
+    prevMessageCount.current = messages.length;
   }, [messages]);
 
   const handleSend = () => {
     if (!input.trim()) return;
-    const now = new Date();
-    const time = now.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
     setMessages((prev) => [
       ...prev,
-      { id: Date.now().toString(), sender: "user", text: input.trim(), time },
+      { id: Date.now().toString(), role: "user", text: input.trim() },
     ]);
     setInput("");
+    isUserScrolledUp.current = false;
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -66,7 +84,6 @@ const ChatMain = ({ sidebarCollapsed, onToggleSidebar, activeId }: Props) => {
     <div className="flex-1 flex flex-col h-screen" style={{ backgroundColor: "var(--color-page-bg)", transition: "flex 280ms cubic-bezier(0.16, 1, 0.3, 1)" }}>
       {showEmptyState ? (
         <>
-          {/* Empty state header — just the menu toggle */}
           {sidebarCollapsed && (
             <header className="flex items-center px-8 py-5">
               <button
@@ -78,7 +95,6 @@ const ChatMain = ({ sidebarCollapsed, onToggleSidebar, activeId }: Props) => {
             </header>
           )}
 
-          {/* Centered empty state */}
           <div className="flex-1 flex items-center justify-center" style={{ padding: "0 10vw" }}>
             <div className="w-full" style={{ maxWidth: 720 }}>
               <h1 className="font-display text-[44px] font-normal text-text-primary leading-tight">
@@ -103,7 +119,6 @@ const ChatMain = ({ sidebarCollapsed, onToggleSidebar, activeId }: Props) => {
             </div>
           </div>
 
-          {/* Composer */}
           <div className="border-t border-divider px-8 py-4">
             <div className="mx-auto flex items-end gap-3" style={{ maxWidth: 720 }}>
               <textarea
@@ -128,48 +143,61 @@ const ChatMain = ({ sidebarCollapsed, onToggleSidebar, activeId }: Props) => {
         </>
       ) : (
         <>
-          {/* Header */}
-          <header className="flex items-center justify-between px-8 py-5 border-b border-divider">
-            <div className="flex items-center gap-4">
-              {sidebarCollapsed && (
-                <button
-                  onClick={onToggleSidebar}
-                  className="font-body text-[13px] font-medium text-text-muted hover:text-text-primary transition-colors uppercase tracking-[0.08em] mr-2"
-                >
-                  Menu
-                </button>
-              )}
-              <h2 className="font-display text-[22px] text-text-primary leading-none">On Solitude</h2>
-            </div>
-            <span className="font-mono text-[12px] text-text-muted">5 messages</span>
-          </header>
+          {/* Thread header */}
+          {sidebarCollapsed && (
+            <header className="flex items-center px-8 py-5">
+              <button
+                onClick={onToggleSidebar}
+                className="font-body text-[13px] font-medium text-text-muted hover:text-text-primary transition-colors uppercase tracking-[0.08em]"
+              >
+                Menu
+              </button>
+            </header>
+          )}
 
-          {/* Messages */}
-          <div className="flex-1 overflow-y-auto px-8 py-6">
-            <div className="mx-auto space-y-6" style={{ maxWidth: 720 }}>
-              {messages.map((msg) => (
-                <div key={msg.id} className={`flex flex-col ${msg.sender === "user" ? "items-end" : "items-start"}`}>
+          {/* Thread */}
+          <div
+            ref={scrollRef}
+            onScroll={handleScroll}
+            className="flex-1 overflow-y-auto"
+            style={{
+              scrollbarWidth: "none",
+              msOverflowStyle: "none",
+            }}
+          >
+            <style>{`.thread-scroll::-webkit-scrollbar { display: none; }`}</style>
+            <div
+              className="mx-auto thread-scroll"
+              style={{ maxWidth: 720, paddingTop: 48, paddingBottom: 120 }}
+            >
+              {messages.map((msg, index) => (
+                <div key={msg.id}>
+                  {index > 0 && (
+                    <div
+                      className="w-full my-0"
+                      style={{ height: 1, backgroundColor: "rgba(26,26,26,0.08)" }}
+                    />
+                  )}
                   <div
-                    className={`max-w-[85%] px-4 py-3 rounded-sm ${
-                      msg.sender === "user"
-                        ? "bg-sidebar-bg border border-divider"
-                        : ""
-                    }`}
+                    className="py-6 message-enter"
+                    style={{
+                      animation: "message-enter 400ms cubic-bezier(0.16, 1, 0.3, 1) both",
+                    }}
                   >
-                    <p className="font-body text-[15px] text-text-primary leading-relaxed">
+                    <span className="font-mono text-[11px] text-text-muted block mb-2">
+                      {msg.role === "user" ? "You" : "Assistant"}
+                    </span>
+                    <p className="font-body text-[15px] text-text-primary" style={{ lineHeight: 1.65 }}>
                       {msg.text}
                     </p>
                   </div>
-                  <span className="font-mono text-[11px] text-text-muted mt-1.5 px-1">
-                    {msg.time}
-                  </span>
                 </div>
               ))}
               <div ref={bottomRef} />
             </div>
           </div>
 
-          {/* Input */}
+          {/* Composer */}
           <div className="border-t border-divider px-8 py-4">
             <div className="mx-auto flex items-end gap-3" style={{ maxWidth: 720 }}>
               <textarea
