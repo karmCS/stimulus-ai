@@ -22,6 +22,7 @@ const Index = () => {
         <ChatMain
           sidebarCollapsed={sidebarCollapsed}
           onToggleSidebar={toggleSidebar}
+          activeId={activeConversation}
         />
       </div>
     </>
