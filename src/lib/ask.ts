@@ -1,7 +1,7 @@
 export type AskSseEvent =
-  | { event: "stage"; data: any }
-  | { event: "final"; data: any }
-  | { event: "error"; data: any };
+  | { type: "stage"; stage: "thinking" }
+  | { type: "final"; data: unknown }
+  | { type: "error"; message: string };
 
 export function ask(
   question: string,
@@ -58,8 +58,25 @@ export function ask(
       } catch {
         // keep as string
       }
-      onEvent?.({ event: event as any, data });
-      if (event === "final" || event === "error") sawTerminalEvent = true;
+
+      if (event === "stage") {
+        // Server should only emit "thinking". If older/stale deployments emit other
+        // stage names, normalize them to "thinking" to keep the UI simple.
+        onEvent?.({ type: "stage", stage: "thinking" });
+      } else if (event === "final") {
+        const payload = (data && typeof data === "object" ? (data as any).data : undefined) ?? data;
+        onEvent?.({ type: "final", data: payload });
+        sawTerminalEvent = true;
+      } else if (event === "error") {
+        const msg =
+          data && typeof data === "object" && typeof (data as any).message === "string"
+            ? (data as any).message
+            : typeof data === "string"
+              ? data
+              : "Unknown error";
+        onEvent?.({ type: "error", message: msg });
+        sawTerminalEvent = true;
+      }
     };
 
     while (true) {

@@ -30,9 +30,6 @@ const ChatMain = ({ sidebarCollapsed, onToggleSidebar, activeId }: Props) => {
   const [composerValue, setComposerValue] = useState("");
   const [hasStartedChat, setHasStartedChat] = useState(false);
   const [isThinking, setIsThinking] = useState(false);
-  const [streamingText, setStreamingText] = useState("");
-  const [isStreaming, setIsStreaming] = useState(false);
-  const [streamComplete, setStreamComplete] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const isUserScrolledUp = useRef(false);
@@ -55,10 +52,10 @@ const ChatMain = ({ sidebarCollapsed, onToggleSidebar, activeId }: Props) => {
 
   // Auto-scroll during streaming
   useEffect(() => {
-    if ((isStreaming || isThinking) && !isUserScrolledUp.current) {
+    if (isThinking && !isUserScrolledUp.current) {
       bottomRef.current?.scrollIntoView({ behavior: "smooth" });
     }
-  }, [streamingText, isThinking, isStreaming]);
+  }, [isThinking]);
 
   // Cleanup in-flight stream on unmount
   useEffect(() => {
@@ -73,62 +70,39 @@ const ChatMain = ({ sidebarCollapsed, onToggleSidebar, activeId }: Props) => {
     abortRef.current = controller;
 
     setIsThinking(true);
-    setIsStreaming(false);
-    setStreamComplete(false);
-    setStreamingText("");
 
     try {
       let finalText = "";
       let finalAnswerObj: Answer | null = null;
-      let started = false;
 
       await ask(question, {
         signal: controller.signal,
         onEvent: (evt) => {
-          if (evt.event === "stage") {
-            if (!started) {
-              started = true;
-              setIsThinking(false);
-              setIsStreaming(true);
-            }
-            const stage = (evt.data as any)?.stage;
-            const status = (evt.data as any)?.status;
-            const label = stage ? `${stage}${status ? ` · ${status}` : ""}` : "Working";
-            setStreamingText(label);
+          if (evt.type === "stage") return;
+          if (evt.type === "error") {
+            finalText = `Server error: ${evt.message}`;
             return;
           }
-
-          if (evt.event === "error") {
-            const msg = (evt.data as any)?.message;
-            finalText = `Server error${msg ? `: ${msg}` : ""}`;
-            return;
-          }
-
-          if (evt.event === "final") {
-            const fa = (evt.data as any)?.finalAnswer;
-            if (fa && typeof fa === "object") {
-              finalAnswerObj = fa as Answer;
-              finalText = fa?.oneLineVerdict ?? "";
+          if (evt.type === "final") {
+            const payload = evt.data;
+            if (payload && typeof payload === "object") {
+              finalAnswerObj = payload as Answer;
+              finalText = (payload as any)?.oneLineVerdict ?? "";
             }
           }
         },
       });
 
-      setStreamComplete(true);
-      setTimeout(() => {
-        setIsStreaming(false);
-        setStreamComplete(false);
-        setStreamingText("");
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: Date.now().toString(),
-            role: "assistant",
-            text: finalText || "Sorry — something went wrong. Please try again.",
-            answer: finalAnswerObj ?? undefined,
-          },
-        ]);
-      }, 250);
+      setIsThinking(false);
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: Date.now().toString(),
+          role: "assistant",
+          text: finalText || "Sorry — something went wrong. Please try again.",
+          answer: finalAnswerObj ?? undefined,
+        },
+      ]);
     } catch (err) {
       if ((err as any)?.name === "AbortError") return;
       console.error("ask() failed", err);
@@ -139,9 +113,6 @@ const ChatMain = ({ sidebarCollapsed, onToggleSidebar, activeId }: Props) => {
             ? err
             : "Unknown error";
       setIsThinking(false);
-      setIsStreaming(false);
-      setStreamComplete(false);
-      setStreamingText("");
       setMessages((prev) => [
         ...prev,
         {
@@ -157,7 +128,7 @@ const ChatMain = ({ sidebarCollapsed, onToggleSidebar, activeId }: Props) => {
 
   const handleSend = (text: string) => {
     setHasStartedChat(true);
-    if (isThinking || isStreaming) return;
+    if (isThinking) return;
     setMessages((prev) => [
       ...prev,
       { id: Date.now().toString(), role: "user", text },
@@ -172,7 +143,7 @@ const ChatMain = ({ sidebarCollapsed, onToggleSidebar, activeId }: Props) => {
   };
 
   const handleRegenerate = useCallback((messageId: string) => {
-    if (isThinking || isStreaming) return;
+    if (isThinking) return;
     // Remove the assistant message to regenerate
     setMessages((prev) => prev.filter((m) => m.id !== messageId));
     isUserScrolledUp.current = false;
@@ -181,7 +152,7 @@ const ChatMain = ({ sidebarCollapsed, onToggleSidebar, activeId }: Props) => {
       const lastUser = [...messages].reverse().find((m) => m.role === "user")?.text;
       if (lastUser) streamAnswer(lastUser);
     }, THINKING_DELAY_MS);
-  }, [isThinking, isStreaming, messages, streamAnswer]);
+  }, [isThinking, messages, streamAnswer]);
 
   const handleChipClick = (text: string) => {
     setComposerValue(text);
@@ -233,7 +204,6 @@ const ChatMain = ({ sidebarCollapsed, onToggleSidebar, activeId }: Props) => {
             initialValue={composerValue}
             onValueChange={setComposerValue}
             isThinking={isThinking}
-            isStreaming={isStreaming}
           />
         </>
       ) : (
@@ -327,7 +297,7 @@ const ChatMain = ({ sidebarCollapsed, onToggleSidebar, activeId }: Props) => {
               ))}
 
               {/* Thinking / Streaming turn */}
-              {(isThinking || isStreaming) && (
+              {isThinking && (
                 <>
                   <div
                     className="relative"
@@ -356,47 +326,17 @@ const ChatMain = ({ sidebarCollapsed, onToggleSidebar, activeId }: Props) => {
                       />
                     </div>
 
-                    {isThinking && !isStreaming && (
-                      <span
-                        className="font-body"
-                        style={{
-                          fontSize: 18,
-                          lineHeight: 1.75,
-                          color: "#2d2b27",
-                          animation: "shimmer 1.4s linear infinite",
-                        }}
-                      >
-                        Thinking
-                      </span>
-                    )}
-
-                    {isStreaming && (
-                      <p
-                        className="font-body"
-                        style={{
-                          fontSize: 18,
-                          lineHeight: 1.75,
-                          color: "#2d2b27",
-                          opacity: streamComplete ? 1 : undefined,
-                          animation: streamComplete
-                            ? "message-enter 400ms cubic-bezier(0.16, 1, 0.3, 1) both"
-                            : undefined,
-                        }}
-                      >
-                        {streamingText}
-                        {!streamComplete && (
-                          <span
-                            className="inline-block align-baseline ml-px"
-                            style={{
-                              width: 1,
-                              height: "1em",
-                              backgroundColor: "#1a1814",
-                              animation: "blink-cursor 500ms step-end infinite",
-                            }}
-                          />
-                        )}
-                      </p>
-                    )}
+                    <span
+                      className="font-body"
+                      style={{
+                        fontSize: 18,
+                        lineHeight: 1.75,
+                        color: "#2d2b27",
+                        animation: "shimmer 1.4s linear infinite",
+                      }}
+                    >
+                      Thinking
+                    </span>
                   </div>
                 </>
               )}
@@ -405,7 +345,7 @@ const ChatMain = ({ sidebarCollapsed, onToggleSidebar, activeId }: Props) => {
             </div>
           </div>
 
-          <Composer onSend={handleSend} isThinking={isThinking} isStreaming={isStreaming} />
+          <Composer onSend={handleSend} isThinking={isThinking} isStreaming={false} />
         </>
       )}
     </div>

@@ -39,33 +39,31 @@ type AskRequestBody = {
   question: string;
 };
 
-type AgentState = {
-  userQuery: string;
-  fitnessGate?: unknown;
-  intent?: unknown;
-  sources?: unknown[];
-  claims?: unknown[];
-  draftAnswer?: unknown;
-  finalAnswer?: unknown;
-  safety?: unknown;
+type SingleAgentBlockedReason =
+  | "ped"
+  | "extreme_diet"
+  | "medical_diagnosis"
+  | "off_topic";
+
+type SingleAgentBlockedResponse = {
+  blocked: true;
+  reason: SingleAgentBlockedReason;
 };
 
-type AnswerVerdictLabel = "Foundational" | "High-value add-on" | "Optional" | "Low impact";
-
-type FinalAnswer = {
-  verdictLabel: AnswerVerdictLabel;
+type SingleAgentOkResponse = {
+  blocked: false;
+  verdictLabel: string;
   oneLineVerdict: string;
   simpleExplanation: string;
-  whatMattersMore: string[];
+  theWhy: string;
+  whatMattersMore: string;
   whoShouldCare: string;
   bottomLine: string;
-  followUps: string[];
-  uncertainty: {
-    level: "low" | "medium" | "high";
-    notes: string[];
-  };
-  citations?: { label: string; url?: string }[];
+  followUps: [string, string, string];
+  uncertainty?: string;
 };
+
+type SingleAgentResponse = SingleAgentBlockedResponse | SingleAgentOkResponse;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -85,52 +83,11 @@ function safeJsonParse(text: string): unknown {
 }
 
 function sanitizeJson(text: string): string {
-  // Best-effort cleanup for common LLM JSON issues.
-  // - strip BOM
-  // - normalize smart quotes
-  // - remove trailing commas
   return text
     .replace(/^\uFEFF/, "")
     .replace(/[“”]/g, "\"")
     .replace(/[‘’]/g, "'")
     .replace(/,\s*([}\]])/g, "$1");
-}
-
-function extractFirstJsonObject(text: string): string | null {
-  const trimmed = text.trim();
-  const fenceMatch = trimmed.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
-  const candidate = (fenceMatch?.[1]?.trim() ?? trimmed).trim();
-
-  if (candidate.startsWith("{") && candidate.endsWith("}")) return candidate;
-
-  const start = candidate.indexOf("{");
-  if (start === -1) return null;
-  let depth = 0;
-  let inString = false;
-  let escaped = false;
-  for (let i = start; i < candidate.length; i++) {
-    const ch = candidate[i];
-    if (inString) {
-      if (escaped) {
-        escaped = false;
-      } else if (ch === "\\") {
-        escaped = true;
-      } else if (ch === "\"") {
-        inString = false;
-      }
-      continue;
-    }
-    if (ch === "\"") {
-      inString = true;
-      continue;
-    }
-    if (ch === "{") depth++;
-    if (ch === "}") {
-      depth--;
-      if (depth === 0) return candidate.slice(start, i + 1);
-    }
-  }
-  return null;
 }
 
 function extractFirstJsonValue(text: string): string | null {
@@ -150,16 +107,14 @@ function extractFirstJsonValue(text: string): string | null {
   const firstArr = candidate.indexOf("[");
   if (firstObj === -1 && firstArr === -1) return null;
 
-  const start = firstObj === -1 ? firstArr : firstArr === -1 ? firstObj : Math.min(firstObj, firstArr);
+  const start =
+    firstObj === -1 ? firstArr : firstArr === -1 ? firstObj : Math.min(firstObj, firstArr);
   const openChar = candidate[start];
   const closeChar = openChar === "{" ? "}" : "]";
 
   let depth = 0;
   let inString = false;
   let escaped = false;
-  // If the model output is truncated, we still want the largest balanced prefix.
-  // Track the last index where the JSON value was fully closed.
-  let lastCompleteEnd = -1;
   for (let i = start; i < candidate.length; i++) {
     const ch = candidate[i];
     if (inString) {
@@ -179,15 +134,127 @@ function extractFirstJsonValue(text: string): string | null {
     if (ch === openChar) depth++;
     if (ch === closeChar) {
       depth--;
-      if (depth === 0) {
-        lastCompleteEnd = i;
-        // If the value ends exactly here, return immediately.
-        return candidate.slice(start, i + 1);
+      if (depth === 0) return candidate.slice(start, i + 1);
+    }
+  }
+  return null;
+}
+
+function normalizeTopic(text: string): string {
+  const lowered = text.toLowerCase();
+  const stripped = lowered.replace(/[^\p{L}\p{N}\s]/gu, " ");
+  return stripped.replace(/\s+/g, " ").trim();
+}
+
+const SINGLE_AGENT_SYSTEM_PROMPT = `You are a world-class strength and conditioning coach and sports science educator. 
+Your personality and lifting knowledge is adjacent to Elijah Mundy, Keenan Mallory, Paul Carter, or TNF, who are prominent figures in the science-based lifting community on TikTok.
+
+You have deep expertise in:
+- Strength training and programming (powerlifting, general strength, periodization)
+- Hypertrophy and muscle building (volume, intensity, frequency, exercise selection)
+- Nutrition and diet (protein, macros, caloric targets, meal timing, supplementation)
+- Recovery and sleep (fatigue management, sleep and performance)
+
+You serve lifters of ALL experience levels — from someone doing their first squat to competitive athletes. You automatically detect the user's experience level from the language and context of their question and adjust your depth and terminology accordingly.
+
+Your coaching style is a blend of two things:
+- A no-nonsense coach: direct, practical, zero fluff. You tell people what actually matters and what to do.
+- A science educator: you briefly explain the "why" behind your advice so the user understands and trusts it, not just follows it.
+
+You NEVER give generic, hedged, or wishy-washy answers. You give a clear position and explain your reasoning.
+
+---
+
+SAFETY RULES — enforce these strictly:
+- If the question involves PEDs, anabolic steroids, SARMs, peptides, or any performance-enhancing drug, respond with: { "blocked": true, "reason": "ped" }
+- If the question involves extreme cutting (under 1000 kcal/day), disordered eating, or dangerous weight-cutting methods, respond with: { "blocked": true, "reason": "extreme_diet" }
+- If the question asks you to diagnose a medical condition, prescribe medication, or interpret medical test results, respond with: { "blocked": true, "reason": "medical_diagnosis" }
+- If the question is completely unrelated to fitness, training, nutrition, or recovery, respond with: { "blocked": true, "reason": "off_topic" }
+
+---
+
+OUTPUT RULES:
+- You MUST respond only with a valid JSON object. No markdown, no preamble, no explanation outside the JSON.
+- Every field in the schema below is required unless marked optional.
+- Keep language clear and direct. No bullet-point walls. Write like a smart coach texting a client, not a fitness blog.
+- Maximum 3 follow-up questions.
+- uncertainty must be honest — if the evidence is genuinely mixed or individual response varies, say so plainly.
+
+---
+
+OUTPUT SCHEMA:
+
+{
+  "blocked": false,
+  "verdictLabel": "string — 2-4 word label summarizing your stance e.g. 'Yes, prioritize this' or 'Mostly a myth'",
+  "oneLineVerdict": "string — one punchy sentence, your clear position on the question",
+  "simpleExplanation": "string — 2-4 sentences. The core answer in plain language. Lead with what matters most.",
+  "theWhy": "string — 2-3 sentences. The mechanism or science behind your answer. Not a literature review — just the key reason this is true.",
+  "whatMattersMore": "string — 1-2 sentences. The most important variable the user should actually focus on. Often this reframes the question.",
+  "whoShouldCare": "string — 1-2 sentences. Who this matters most for and who can safely ignore it.",
+  "bottomLine": "string — 1 sentence. The single most actionable takeaway.",
+  "followUps": ["string", "string", "string"],
+  "uncertainty": "string — optional. Only include if evidence is genuinely mixed, highly individual, or emerging. Be specific about what is uncertain and why."
+}`;
+
+function looksLikeBlockedResponse(value: unknown): value is SingleAgentBlockedResponse {
+  if (!isRecord(value)) return false;
+  return value.blocked === true && typeof value.reason === "string";
+}
+
+function looksLikeOkResponse(value: unknown): value is SingleAgentOkResponse {
+  if (!isRecord(value)) return false;
+  if (value.blocked !== false) return false;
+  const requiredStringKeys = [
+    "verdictLabel",
+    "oneLineVerdict",
+    "simpleExplanation",
+    "theWhy",
+    "whatMattersMore",
+    "whoShouldCare",
+    "bottomLine",
+  ] as const;
+  for (const k of requiredStringKeys) {
+    if (typeof value[k] !== "string") return false;
+  }
+  if (!Array.isArray(value.followUps) || value.followUps.length !== 3) return false;
+  if (!value.followUps.every((x) => typeof x === "string")) return false;
+  if (value.uncertainty !== undefined && typeof value.uncertainty !== "string") return false;
+  return true;
+}
+
+function coerceSingleAgentResponse(value: unknown): SingleAgentResponse | null {
+  // Already in the right shape
+  if (looksLikeBlockedResponse(value) || looksLikeOkResponse(value)) {
+    return value as SingleAgentResponse;
+  }
+
+  // If the DB column is `text` (or evidence was stored as a JSON string),
+  // PostgREST will return a string. Try to recover it.
+  if (typeof value === "string") {
+    const jsonText = extractFirstJsonValue(value);
+    const parsedUnknown = jsonText ? safeJsonParse(sanitizeJson(jsonText)) : undefined;
+    if (looksLikeBlockedResponse(parsedUnknown) || looksLikeOkResponse(parsedUnknown)) {
+      return parsedUnknown as SingleAgentResponse;
+    }
+  }
+
+  // Some callers might have stored the full SSE wrapper shape
+  // { type: "final", data: <response> }. Recover that too.
+  if (isRecord(value) && "data" in value) {
+    const inner = (value as any).data;
+    if (looksLikeBlockedResponse(inner) || looksLikeOkResponse(inner)) {
+      return inner as SingleAgentResponse;
+    }
+    if (typeof inner === "string") {
+      const jsonText = extractFirstJsonValue(inner);
+      const parsedUnknown = jsonText ? safeJsonParse(sanitizeJson(jsonText)) : undefined;
+      if (looksLikeBlockedResponse(parsedUnknown) || looksLikeOkResponse(parsedUnknown)) {
+        return parsedUnknown as SingleAgentResponse;
       }
     }
   }
-  // Truncated/incomplete tail: return the last fully closed value if we saw one.
-  if (lastCompleteEnd !== -1) return candidate.slice(start, lastCompleteEnd + 1);
+
   return null;
 }
 
@@ -232,74 +299,6 @@ async function anthropicMessageText(opts: {
   return first.text;
 }
 
-async function callAgentJSON<T extends object>(opts: {
-  apiKey: string;
-  model: string;
-  agentName: string;
-  input: unknown;
-  outputSchemaHint: string;
-  instructions: string;
-  temperature?: number;
-  maxTokens?: number;
-}): Promise<{ output: T; rawText: string }> {
-  const system =
-    `You are ${opts.agentName}.\n` +
-    `Single responsibility: ${opts.instructions}\n\n` +
-    "Hard rules:\n" +
-    "- Output MUST be valid JSON.\n" +
-    "- Output ONLY JSON. No markdown. No preamble.\n" +
-    "- Do NOT include chain-of-thought.\n" +
-    "- Do NOT generate any final UI prose unless explicitly asked.\n\n" +
-    "Output JSON schema (hint):\n" +
-    opts.outputSchemaHint +
-    "\n\nReturn format requirements:\n" +
-    "- Start your response with `{` and end with `}`.\n" +
-    "- Use double quotes for all JSON strings.\n" +
-    "- No trailing commas.\n";
-
-  const user = JSON.stringify(opts.input ?? {}, null, 2);
-  const rawText = await anthropicMessageText({
-    apiKey: opts.apiKey,
-    model: opts.model,
-    system,
-    user,
-    maxTokens: opts.maxTokens ?? 900,
-    temperature: opts.temperature ?? 0.2,
-  });
-
-  const jsonText = extractFirstJsonValue(rawText);
-  const parsed = jsonText ? safeJsonParse(sanitizeJson(jsonText)) : undefined;
-  if (isRecord(parsed)) return { output: parsed as T, rawText };
-
-  const repairSystem =
-    `You are ${opts.agentName}.\n` +
-    "Your previous output was not valid JSON.\n" +
-    "Return ONLY valid JSON matching the schema. No markdown.\n" +
-    "Start with `{` and end with `}`. No trailing commas.\n" +
-    "If the previous output is truncated or contains an incomplete last item, DROP the incomplete fragment and return a smaller but valid JSON object that still matches the schema.\n\n" +
-    "Schema (hint):\n" +
-    opts.outputSchemaHint;
-  const repairUser =
-    "Fix the following into valid JSON only.\n\n" +
-    rawText;
-  const repaired = await anthropicMessageText({
-    apiKey: opts.apiKey,
-    model: opts.model,
-    system: repairSystem,
-    user: repairUser,
-    // Repair often needs more room than the original (especially if the original was truncated).
-    maxTokens: Math.min(1800, Math.max(1200, (opts.maxTokens ?? 900) * 2)),
-    temperature: 0,
-  });
-  const repairedJsonText = extractFirstJsonValue(repaired);
-  const repairedParsed = repairedJsonText ? safeJsonParse(sanitizeJson(repairedJsonText)) : undefined;
-  if (!isRecord(repairedParsed)) {
-    const snippet = repaired.slice(0, 4000);
-    throw new Error(`${opts.agentName} did not return valid JSON after repair. RAW_OUTPUT:\n${snippet}`);
-  }
-  return { output: repairedParsed as T, rawText: repaired };
-}
-
 async function insertSupabaseRow(opts: {
   supabaseUrl: string;
   serviceRoleKey: string;
@@ -319,7 +318,9 @@ async function insertSupabaseRow(opts: {
   });
   if (!res.ok) {
     const text = await res.text().catch(() => "");
-    throw new Error(`Supabase insert failed (${opts.table}) (${res.status}): ${text || res.statusText}`);
+    throw new Error(
+      `Supabase insert failed (${opts.table}) (${res.status}): ${text || res.statusText}`,
+    );
   }
   return await res.json().catch(() => undefined);
 }
@@ -352,7 +353,8 @@ async function upsertSupabaseRow(opts: {
   row: Record<string, unknown>;
   onConflict: string;
 }): Promise<unknown> {
-  const url = `${opts.supabaseUrl.replace(/\/+$/, "")}/rest/v1/${opts.table}?on_conflict=${encodeURIComponent(opts.onConflict)}`;
+  const url =
+    `${opts.supabaseUrl.replace(/\/+$/, "")}/rest/v1/${opts.table}?on_conflict=${encodeURIComponent(opts.onConflict)}`;
   const res = await fetch(url, {
     method: "POST",
     headers: {
@@ -365,7 +367,9 @@ async function upsertSupabaseRow(opts: {
   });
   if (!res.ok) {
     const text = await res.text().catch(() => "");
-    throw new Error(`Supabase upsert failed (${opts.table}) (${res.status}): ${text || res.statusText}`);
+    throw new Error(
+      `Supabase upsert failed (${opts.table}) (${res.status}): ${text || res.statusText}`,
+    );
   }
   return await res.json().catch(() => undefined);
 }
@@ -411,8 +415,6 @@ Deno.serve(async (req) => {
   }
   const question = payload.question.trim();
 
-  const state: AgentState = { userQuery: question };
-
   // Always respond via SSE for POST requests.
   const encoder = new TextEncoder();
   const stream = new ReadableStream<Uint8Array>({
@@ -422,7 +424,12 @@ Deno.serve(async (req) => {
         controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
       };
 
-      // Create run row (best-effort). If env missing, we still proceed and rely on function logs.
+      // 1) SSE: thinking immediately
+      send("stage", { type: "stage", stage: "thinking" });
+
+      const startedAll = Date.now();
+
+      // Create run row (best-effort).
       let runId: string = crypto.randomUUID();
       try {
         if (supabaseUrl && serviceRoleKey) {
@@ -440,14 +447,31 @@ Deno.serve(async (req) => {
         console.log("agent_runs insert failed:", (e as Error)?.message ?? e);
       }
 
-      async function logStep(step: {
-    agentName: string;
-    input: unknown;
-    output?: unknown;
-    status: "ok" | "error";
-    latencyMs?: number;
-    error?: string;
-      }) {
+      const logRunBestEffort = async (data: Record<string, unknown>) => {
+        try {
+          if (!runId || !supabaseUrl || !serviceRoleKey) return;
+          const url = `${supabaseUrl.replace(/\/+$/, "")}/rest/v1/agent_runs?id=eq.${runId}`;
+          await fetch(url, {
+            method: "PATCH",
+            headers: {
+              apikey: serviceRoleKey,
+              Authorization: `Bearer ${serviceRoleKey}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify(data),
+          }).catch(() => {});
+        } catch {
+          // ignore
+        }
+      };
+
+      const logStepBestEffort = async (step: {
+        status: "ok" | "error";
+        latencyMs: number;
+        input: unknown;
+        output: unknown;
+        error: string | null;
+      }) => {
         try {
           if (!supabaseUrl || !serviceRoleKey) return;
           await insertSupabaseRow({
@@ -456,7 +480,7 @@ Deno.serve(async (req) => {
             table: "agent_steps",
             row: {
               run_id: runId,
-              agent_name: step.agentName,
+              agent_name: "single_agent",
               status: step.status,
               latency_ms: step.latencyMs,
               input: step.input as any,
@@ -467,499 +491,232 @@ Deno.serve(async (req) => {
         } catch (e) {
           console.log("agent_steps insert failed:", (e as Error)?.message ?? e);
         }
-      }
-
-      type RunAgentArgs<T extends object> = Parameters<typeof callAgentJSON<T>>[0] & {
-        stage?: string;
-        emitStages?: boolean;
       };
 
-      async function runAgent<T extends object>(args: RunAgentArgs<T>) {
-        const stage = args.stage ?? args.agentName;
-        const emitStages = args.emitStages ?? true;
-        if (emitStages) send("stage", { runId, stage, status: "started" });
-        const started = Date.now();
-        try {
-          const { stage: _stage, emitStages: _emitStages, ...callArgs } = args;
-          const { output, rawText } = await callAgentJSON<T>(callArgs);
-          await logStep({
-            agentName: args.agentName,
-            input: args.input,
-            output,
-            status: "ok",
-            latencyMs: elapsedMs(started),
-          });
-          if (emitStages) send("stage", { runId, stage, status: "done" });
-          return output;
-        } catch (e) {
-          await logStep({
-            agentName: args.agentName,
-            input: args.input,
-            status: "error",
-            latencyMs: elapsedMs(started),
-            error: (e as Error)?.message ?? String(e),
-          });
-          if (emitStages) send("stage", { runId, stage, status: "done" });
-          throw e;
-        }
-      }
-
-      try {
-    // 1) FitnessGate
-    const qLower = question.toLowerCase();
-    const highRiskTriggers = [
-      "testosterone",
-      "tren",
-      "trenbolone",
-      "anavar",
-      "winstrol",
-      "dianabol",
-      "decadurabolin",
-      "nandrolone",
-      "clenbuterol",
-      "steroid",
-      "cycle ",
-      "pct",
-      "sarms",
-      "mk-677",
-      "rad-140",
-      "lgd-4033",
-      "ostarine",
-      "cardarine",
-    ];
-    const isHighRiskHeuristic = highRiskTriggers.some((t) => qLower.includes(t));
-
-    if (isHighRiskHeuristic) {
-      const finalAnswer: FinalAnswer = {
-        verdictLabel: "Foundational",
-        oneLineVerdict: "I can’t help with PED/steroid cycles or instructions.",
-        simpleExplanation:
-          "That’s high-risk and can cause serious health harms. If your question is about training or nutrition instead, I can help with a safer, evidence-grounded plan.",
-        whatMattersMore: ["Training consistency", "Sleep + recovery", "Nutrition fundamentals (protein + calories)"],
-        whoShouldCare: "Anyone trying to make progress without taking unnecessary health risks.",
-        bottomLine: "Ask a training/nutrition question and I’ll give a clear, prioritized answer.",
-        followUps: ["What’s your goal (fat loss or muscle gain)?", "How many days/week can you train?", "What equipment do you have access to?"],
-        uncertainty: { level: "low", notes: ["PED guidance is restricted by safety policy."] },
-      };
-      send("final", { runId, finalAnswer, debug: { risk_level: "high", heuristic: "ped_trigger" } });
-      controller.close();
-      return;
-    }
-
-    const fitnessGate = await runAgent<{
-      allowed: boolean;
-      domain: string;
-      subdomain: string;
-      risk_level: "low" | "medium" | "high";
-      reason?: string;
-    }>({
-      apiKey,
-      model,
-      agentName: "FitnessGate",
-      stage: "fitness_gate",
-      instructions:
-        "Classify whether the query is fitness/nutrition related and assign risk level. Block PEDs, extreme dieting, medical diagnosis requests.",
-      outputSchemaHint:
-        '{ "allowed": true, "domain": "fitness", "subdomain": "supplements", "risk_level": "low", "reason": "optional short reason" }',
-      input: { userQuery: question, heuristic: { ped_like: isHighRiskHeuristic } },
-      temperature: 0,
-    });
-    state.fitnessGate = fitnessGate;
-
-    // Update run row fields best-effort
-    try {
-      if (runId && supabaseUrl && serviceRoleKey) {
-        const url = `${supabaseUrl.replace(/\/+$/, "")}/rest/v1/agent_runs?id=eq.${runId}`;
-        await fetch(url, {
-          method: "PATCH",
-          headers: {
-            apikey: serviceRoleKey,
-            Authorization: `Bearer ${serviceRoleKey}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            allowed: fitnessGate.allowed,
-            risk_level: fitnessGate.risk_level,
-            domain: fitnessGate.domain,
-            subdomain: fitnessGate.subdomain,
-          }),
-        }).catch(() => {});
-      }
-    } catch {
-      // ignore
-    }
-
-        if (!fitnessGate.allowed) {
-      const finalAnswer: FinalAnswer = {
-        verdictLabel: "Foundational",
-        oneLineVerdict: "I can only help with fitness, training, nutrition, supplements, recovery, and body composition.",
-        simpleExplanation:
-          "Try rephrasing your question into one of those topics. If this is a health or medical issue, it’s best to ask a qualified clinician.",
-        whatMattersMore: ["Clear goal (fat loss vs muscle gain)", "Training plan basics", "Protein + sleep + consistency"],
-        whoShouldCare: "Anyone training and trying to make progress safely.",
-        bottomLine: "Ask a fitness-specific question and I’ll answer it in a simple, science-grounded way.",
-        followUps: ["What’s your goal (fat loss or muscle gain)?", "What’s your training experience level?", "How many days/week do you train?"],
-        uncertainty: { level: "low", notes: ["Out-of-scope query was blocked by the fitness gate."] },
-      };
-      state.finalAnswer = finalAnswer;
-      try {
-        if (runId && supabaseUrl && serviceRoleKey) {
-          const url = `${supabaseUrl.replace(/\/+$/, "")}/rest/v1/agent_runs?id=eq.${runId}`;
-          await fetch(url, {
-            method: "PATCH",
-            headers: {
-              apikey: serviceRoleKey,
-              Authorization: `Bearer ${serviceRoleKey}`,
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({ final_answer: finalAnswer }),
-          }).catch(() => {});
-        }
-      } catch {
-        // ignore
-      }
-          send("final", { runId, finalAnswer, debug: { risk_level: (fitnessGate as any).risk_level } });
-          controller.close();
-          return;
-        }
-
-    // 2) IntentParser
-    const intent = await runAgent<{
-      topic: string;
-      intent: string;
-      goals: string[];
-      ambiguities: string[];
-      subquestions: string[];
-      personalizationHints: { goal?: string; experience?: string; training_frequency?: string };
-      researchPlan: {
-        evidenceThreshold: "low" | "medium" | "high";
-        mandatoryAnswerSections: string[];
-        searchStrategy: string;
-      };
-    }>({
-      apiKey,
-      model,
-      agentName: "IntentParser",
-      stage: "intent_parser",
-      instructions:
-        "Structure the user question into topic, intent, goals, ambiguities, subquestions, personalizationHints, and a researchPlan that guides downstream research and answer structure.",
-      outputSchemaHint:
-        '{ "topic": "creatine", "intent": "importance", "goals": ["muscle gain"], "ambiguities": ["user goal unclear"], "subquestions": ["Does creatine help strength?"], "personalizationHints": { "goal": "muscle gain", "experience": "beginner", "training_frequency": "3x/week" }, "researchPlan": { "evidenceThreshold": "medium", "mandatoryAnswerSections": ["verdictLabel","oneLineVerdict","simpleExplanation","whatMattersMore","whoShouldCare","bottomLine","followUps","uncertainty"], "searchStrategy": "Prefer meta-analyses/position stands; note practical relevance and limitations; avoid overclaiming." } }',
-      input: { userQuery: question, fitnessGate },
-      temperature: 0.2,
-    });
-    state.intent = intent;
-
-    // 4) Research cache lookup (best-effort). If unavailable, fall back to running researchers.
-    const topicKey = String((intent as any).topic ?? "").trim().toLowerCase();
-    const subdomainKey = String((fitnessGate as any).subdomain ?? "").trim().toLowerCase();
-    const cacheKey = `topic:${topicKey}|sub:${subdomainKey}`;
-
-    type EvidenceOut = { findings: string[]; sources: { label: string; type: string; url?: string }[] };
-    type PracticalOut = { findings: string[]; practical_notes: string[] };
-    type LimitationsOut = { caveats: string[]; edge_cases: string[]; safety_flags: string[] };
-    type RankedOut = { ranked_sources: { label: string; type: string; score: number; url?: string }[] };
-
-    let evidence: EvidenceOut | null = null;
-    let practical: PracticalOut | null = null;
-    let limitations: LimitationsOut | null = null;
-    let rankedSources: RankedOut | null = null;
-
-    send("stage", { runId, stage: "cache_lookup", status: "started" });
-    try {
-      if (supabaseUrl && serviceRoleKey && topicKey) {
-        const nowIso = new Date().toISOString();
-        const rows = await fetchSupabaseRows({
-          supabaseUrl,
-          serviceRoleKey,
-          pathAndQuery:
-            `research_cache?cache_key=eq.${encodeURIComponent(cacheKey)}` +
-            `&expires_at=gt.${encodeURIComponent(nowIso)}` +
-            `&select=evidence,practical,limitations,ranked_sources,hit_count` +
-            `&limit=1`,
+      // 1) Hard heuristic PED keyword block (before any LLM call)
+      const qLower = question.toLowerCase();
+      const pedTriggers = [
+        "testosterone",
+        "tren",
+        "trenbolone",
+        "anavar",
+        "winstrol",
+        "dianabol",
+        "decadurabolin",
+        "nandrolone",
+        "clenbuterol",
+        "steroid",
+        "cycle ",
+        "pct",
+        "sarms",
+        "mk-677",
+        "rad-140",
+        "lgd-4033",
+        "ostarine",
+        "cardarine",
+      ];
+      const isPedHeuristic = pedTriggers.some((t) => qLower.includes(t));
+      if (isPedHeuristic) {
+        const blocked: SingleAgentBlockedResponse = { blocked: true, reason: "ped" };
+        await logStepBestEffort({
+          status: "ok",
+          latencyMs: elapsedMs(startedAll),
+          input: { question },
+          output: { blocked, raw: "heuristic_ped_block" },
+          error: null,
         });
-        if (Array.isArray(rows) && rows[0]) {
-          const row = rows[0] as any;
-          evidence = row.evidence ?? null;
-          practical = row.practical ?? null;
-          limitations = row.limitations ?? null;
-          rankedSources = row.ranked_sources ? { ranked_sources: row.ranked_sources } : null;
-
-          // bump hit_count best-effort
-          try {
-            const patchUrl = `${supabaseUrl.replace(/\/+$/, "")}/rest/v1/research_cache?cache_key=eq.${encodeURIComponent(cacheKey)}`;
-            await fetch(patchUrl, {
-              method: "PATCH",
-              headers: {
-                apikey: serviceRoleKey,
-                Authorization: `Bearer ${serviceRoleKey}`,
-                "Content-Type": "application/json",
-              },
-              body: JSON.stringify({ hit_count: (row.hit_count ?? 0) + 1 }),
-            }).catch(() => {});
-          } catch {
-            // ignore
-          }
-        }
+        await logRunBestEffort({
+          query: question,
+          response: blocked,
+          latency_ms: elapsedMs(startedAll),
+          cached: false,
+          blocked: true,
+          block_reason: "ped",
+        });
+        send("final", { type: "final", data: blocked });
+        controller.close();
+        return;
       }
-    } catch (e) {
-      console.log("research_cache lookup failed:", (e as Error)?.message ?? e);
-    }
-    send("stage", { runId, stage: "cache_lookup", status: "done", summary: evidence ? "hit" : "miss" });
 
-    // Maintain SSE stage sequence even on cache hits (no extra work performed).
-    if (evidence && practical && limitations) {
-      send("stage", { runId, stage: "researchers", status: "started" });
-      send("stage", { runId, stage: "researchers", status: "done", summary: "cache" });
-    }
-    if (rankedSources) {
-      send("stage", { runId, stage: "source_ranker", status: "started" });
-      send("stage", { runId, stage: "source_ranker", status: "done", summary: "cache" });
-    }
+      // 2) Cache lookup (best-effort). Cache key: topic:<normalized_user_topic>
+      const topicKey = normalizeTopic(question);
+      const cacheKey = `topic:${topicKey}`;
+      let cachedResponse: SingleAgentResponse | null = null;
+      let wasCacheHit = false;
 
-    if (!evidence || !practical || !limitations) {
-      // 4) Parallel Researchers
-      send("stage", { runId, stage: "researchers", status: "started" });
-      const out = await Promise.all([
-        runAgent<EvidenceOut>({
-          apiKey,
-          model,
-          agentName: "EvidenceResearcher",
-          emitStages: false,
-          instructions:
-            "Find the highest-quality evidence (meta-analyses, systematic reviews, position stands) relevant to the question. Output findings and sources.",
-          outputSchemaHint:
-            '{ "findings": ["Conservative evidence-based summary..."], "sources": [{ "label": "Author et al. (Year) Journal", "type": "meta-analysis", "url": "optional" }] }',
-          input: { userQuery: question, intent, researchPlan: (intent as any).researchPlan },
-          temperature: 0.2,
-        }),
-        runAgent<PracticalOut>({
-          apiKey,
-          model,
-          agentName: "PracticalContextResearcher",
-          emitStages: false,
-          instructions:
-            "Translate the question into real-world importance and prioritization (fundamentals > supplements). Return practical notes, not final prose.",
-          outputSchemaHint:
-            '{ "findings": ["What matters in practice..."], "practical_notes": ["Implementation note..."] }',
-          input: { userQuery: question, intent, fitnessGate, researchPlan: (intent as any).researchPlan },
-          temperature: 0.3,
-        }),
-        runAgent<LimitationsOut>({
-          apiKey,
-          model,
-          agentName: "LimitationsResearcher",
-          emitStages: false,
-          instructions:
-            "List caveats, edge cases, and safety flags. Be conservative and explicit about uncertainty or mixed evidence.",
-          outputSchemaHint:
-            '{ "caveats": ["Evidence is mixed on..."], "edge_cases": ["If training status is..."], "safety_flags": ["Kidney disease is a contraindication for..."] }',
-          input: { userQuery: question, intent, fitnessGate, researchPlan: (intent as any).researchPlan },
-          temperature: 0.2,
-        }),
-      ]);
-      evidence = out[0];
-      practical = out[1];
-      limitations = out[2];
-      send("stage", { runId, stage: "researchers", status: "done" });
-
-      // 5) SourceRanker
-      rankedSources = await runAgent<RankedOut>({
-        apiKey,
-        model,
-        agentName: "SourceRanker",
-        stage: "source_ranker",
-        instructions:
-          "Rank sources with priority: meta-analyses > systematic reviews > position stands > primary studies > reputable summaries. Output a ranked list with scores.",
-        outputSchemaHint:
-          '{ "ranked_sources": [{ "label": "Source", "type": "meta-analysis", "score": 0.92, "url": "optional" }] }',
-        input: { sources: (evidence as any).sources ?? [], intent },
-        temperature: 0,
-      });
-
-      // Upsert cache best-effort (TTL: 14 days)
       try {
         if (supabaseUrl && serviceRoleKey && topicKey) {
-          const expiresAt = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString();
-          await upsertSupabaseRow({
+          const nowIso = new Date().toISOString();
+          const rows = await fetchSupabaseRows({
             supabaseUrl,
             serviceRoleKey,
-            table: "research_cache",
-            onConflict: "cache_key",
-            row: {
-              cache_key: cacheKey,
-              topic: topicKey,
-              subdomain: subdomainKey || null,
-              evidence,
-              practical,
-              limitations,
-              ranked_sources: rankedSources?.ranked_sources ?? null,
-              expires_at: expiresAt,
-            },
+            pathAndQuery:
+              `research_cache?cache_key=eq.${encodeURIComponent(cacheKey)}` +
+              `&expires_at=gt.${encodeURIComponent(nowIso)}` +
+              `&select=evidence,hit_count` +
+              `&limit=1`,
           });
+          if (Array.isArray(rows) && rows[0]) {
+            const row = rows[0] as any;
+            const evidence = row.evidence ?? null;
+            cachedResponse = coerceSingleAgentResponse(evidence);
+            wasCacheHit = cachedResponse !== null;
+
+            // bump hit_count best-effort
+            try {
+              const patchUrl =
+                `${supabaseUrl.replace(/\/+$/, "")}/rest/v1/research_cache?cache_key=eq.${encodeURIComponent(cacheKey)}`;
+              await fetch(patchUrl, {
+                method: "PATCH",
+                headers: {
+                  apikey: serviceRoleKey,
+                  Authorization: `Bearer ${serviceRoleKey}`,
+                  "Content-Type": "application/json",
+                },
+                body: JSON.stringify({ hit_count: (row.hit_count ?? 0) + 1 }),
+              }).catch(() => {});
+            } catch {
+              // ignore
+            }
+          }
         }
       } catch (e) {
-        console.log("research_cache upsert failed:", (e as Error)?.message ?? e);
+        console.log("research_cache lookup failed:", (e as Error)?.message ?? e);
       }
-    }
 
-    state.sources = rankedSources?.ranked_sources ?? [];
+      // Only cache successful responses, and we only serve cache hits that are non-blocked.
+      if (cachedResponse && cachedResponse.blocked === false) {
+        await logStepBestEffort({
+          status: "ok",
+          latencyMs: elapsedMs(startedAll),
+          input: { question },
+          output: { cached: true, cache_key: cacheKey, evidence: cachedResponse },
+          error: null,
+        });
+        await logRunBestEffort({
+          query: question,
+          response: cachedResponse,
+          latency_ms: elapsedMs(startedAll),
+          cached: true,
+          blocked: false,
+          block_reason: null,
+        });
+        // "Redesigned" payload on cache hits: keep response schema intact under `data`,
+        // but add explicit cache metadata for the client to vary UI as needed.
+        send("final", {
+          type: "final",
+          data: cachedResponse,
+          meta: { cached: true, cache_key: cacheKey, cache_hit: wasCacheHit },
+        });
+        controller.close();
+        return;
+      }
 
-    // 6) ClaimVerifier (extract + verify in one pass)
-    const claimVerification = await runAgent<{
-      verifiedClaims: { claim: string; confidence: "low" | "medium" | "high"; sourceLabel: string }[];
-      removedClaims: { claim: string; reason: string }[];
-    }>({
-      apiKey,
-      model,
-      agentName: "ClaimVerifier",
-      stage: "claim_verifier",
-      instructions:
-        "Given researcher outputs and ranked sources, extract atomic conservatively worded claims AND in the same pass remove or soften any claim that lacks direct source support. Output verifiedClaims (max 8, each with a single sourceLabel) and removedClaims. No narrative.",
-      outputSchemaHint:
-        '{ "verifiedClaims": [{ "claim": "Atomic claim...", "confidence": "medium", "sourceLabel": "Author (Year)" }], "removedClaims": [{ "claim": "Claim removed", "reason": "Not directly supported by the ranked sources provided." }] }',
-      input: { evidence, practical, limitations, rankedSources, intent },
-      temperature: 0,
-      maxTokens: 1200,
-    });
-    state.claims = claimVerification.verifiedClaims;
-
-    // 7) TeacherWriter (final draft; no simplification pass)
-    const draft = await runAgent<{
-      verdictLabel: AnswerVerdictLabel;
-      oneLineVerdict: string;
-      simpleExplanation: string;
-      whatMattersMore: string[];
-      whoShouldCare: string;
-      bottomLine: string;
-      followUps: string[];
-      uncertainty: { level: "low" | "medium" | "high"; notes: string[] };
-      citations_needed: boolean;
-      citation_candidates: string[];
-    }>({
-      apiKey,
-      model,
-      agentName: "TeacherWriter",
-      instructions:
-        'Write the answer sections using ONLY verified claims. Be simple, decisive, and prioritized. Include uncertainty/tradeoffs. Do not add new facts. Write in plain language. Be concise and actionable. Do not use jargon. Your first draft is your final draft — do not leave anything that needs simplification. Keep arrays short: whatMattersMore max 6 items; followUps max 5 items; citation_candidates max 6 items, each under 120 characters.',
-      outputSchemaHint:
-        '{ "verdictLabel": "High-value add-on", "oneLineVerdict": "...", "simpleExplanation": "...", "whatMattersMore": ["..."], "whoShouldCare": "...", "bottomLine": "...", "followUps": ["..."], "uncertainty": { "level": "medium", "notes": ["..."] }, "citations_needed": true, "citation_candidates": ["Source label"] }',
-      input: {
-        userQuery: question,
-        intent,
-        verifiedClaims: claimVerification.verifiedClaims,
-        removedClaims: claimVerification.removedClaims,
-      },
-      temperature: 0.4,
-      maxTokens: 1600,
-      stage: "teacher_writer",
-    });
-    state.draftAnswer = draft;
-
-    // 8) SafetyPolicyAgent
-    const safety = await runAgent<{
-      allowed: boolean;
-      modifications: string[];
-      safety_notes: string[];
-      final_overrides?: Partial<FinalAnswer>;
-    }>({
-      apiKey,
-      model,
-      agentName: "SafetyPolicyAgent",
-      stage: "safety_policy",
-      instructions:
-        "Enforce fitness safety: block PED guidance, extreme dieting, injury misuse, and medical diagnosis. Modify unsafe sections and add safety notes as needed.",
-      outputSchemaHint:
-        '{ "allowed": true, "modifications": ["..."], "safety_notes": ["..."], "final_overrides": { "bottomLine": "optional override" } }',
-      input: { userQuery: question, risk_level: (fitnessGate as any).risk_level, draft },
-      temperature: 0,
-    });
-    state.safety = safety;
-
-    if (!safety.allowed) {
-      const finalAnswer: FinalAnswer = {
-        verdictLabel: "Foundational",
-        oneLineVerdict: "I can’t safely answer that request as asked.",
-        simpleExplanation:
-          "Some fitness topics can be high-risk (injury, extreme dieting, or medical concerns). If you reframe it toward safe training, recovery, or nutrition fundamentals, I can help.",
-        whatMattersMore: ["Training basics", "Nutrition fundamentals", "Sleep + recovery"],
-        whoShouldCare: "Anyone trying to train safely and make steady progress.",
-        bottomLine: "Ask a safer, fitness-focused version of the question and I’ll answer clearly.",
-        followUps: ["What’s your goal (fat loss or muscle gain)?", "Any injuries or pain right now?", "How many days/week can you train?"],
-        uncertainty: { level: "low", notes: ["Safety policy blocked a high-risk request."] },
+      const attemptSingleAgent = async (): Promise<{
+        rawText: string;
+        parsed: SingleAgentResponse;
+      }> => {
+        const rawText = await anthropicMessageText({
+          apiKey,
+          model,
+          system: SINGLE_AGENT_SYSTEM_PROMPT,
+          user: question,
+          maxTokens: 1400,
+          temperature: 0.2,
+        });
+        const jsonText = extractFirstJsonValue(rawText);
+        const parsedUnknown = jsonText ? safeJsonParse(sanitizeJson(jsonText)) : undefined;
+        if (looksLikeBlockedResponse(parsedUnknown)) return { rawText, parsed: parsedUnknown };
+        if (looksLikeOkResponse(parsedUnknown)) return { rawText, parsed: parsedUnknown };
+        throw new Error("LLM response was not valid JSON for the required schema.");
       };
-      state.finalAnswer = finalAnswer;
-      send("final", { runId, finalAnswer, debug: { risk_level: (fitnessGate as any).risk_level, safety_notes: safety.safety_notes } });
+
+      // 3) Single Claude API call (retry once on invalid JSON)
+      const startedAgent = Date.now();
+      let rawText: string | null = null;
+      let parsed: SingleAgentResponse | null = null;
+      let stepError: string | null = null;
+
+      try {
+        const a1 = await attemptSingleAgent();
+        rawText = a1.rawText;
+        parsed = a1.parsed;
+      } catch {
+        try {
+          const a2 = await attemptSingleAgent();
+          rawText = a2.rawText;
+          parsed = a2.parsed;
+        } catch (e2) {
+          stepError = (e2 as Error)?.message ?? String(e2);
+        }
+      }
+
+      await logStepBestEffort({
+        status: stepError ? "error" : "ok",
+        latencyMs: elapsedMs(startedAgent),
+        input: { question },
+        output: rawText,
+        error: stepError,
+      });
+
+      if (stepError || !parsed) {
+        await logRunBestEffort({
+          query: question,
+          response: null,
+          latency_ms: elapsedMs(startedAll),
+          cached: false,
+          blocked: false,
+          block_reason: null,
+        });
+        send("error", { type: "error", message: stepError || "Unknown error" });
+        controller.close();
+        return;
+      }
+
+      const blocked = parsed.blocked === true;
+      const blockReason = blocked ? (parsed as SingleAgentBlockedResponse).reason : null;
+
+      // Cache only on successful, non-blocked responses. TTL: 7 days.
+      if (!blocked) {
+        try {
+          if (supabaseUrl && serviceRoleKey && topicKey) {
+            const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+            await upsertSupabaseRow({
+              supabaseUrl,
+              serviceRoleKey,
+              table: "research_cache",
+              onConflict: "cache_key",
+              row: {
+                cache_key: cacheKey,
+                topic: topicKey,
+                subdomain: null,
+                evidence: parsed,
+                practical: null,
+                limitations: null,
+                ranked_sources: null,
+                expires_at: expiresAt,
+              },
+            });
+          }
+        } catch (e) {
+          console.log("research_cache upsert failed:", (e as Error)?.message ?? e);
+        }
+      }
+
+      await logRunBestEffort({
+        query: question,
+        response: parsed,
+        latency_ms: elapsedMs(startedAll),
+        cached: false,
+        blocked,
+        block_reason: blockReason,
+      });
+
+      // 4) SSE final
+      send("final", { type: "final", data: parsed });
       controller.close();
-      return;
-    }
-
-    // 9) ResponseFormatter (final UI-ready JSON)
-    const formatted = await runAgent<FinalAnswer>({
-      apiKey,
-      model,
-      agentName: "ResponseFormatter",
-      stage: "response_formatter",
-      instructions:
-        "Produce the final UI-ready JSON in the mandatory answer structure. Use only the simplified text plus safety constraints. Add citations only if needed.",
-      outputSchemaHint:
-        '{ "verdictLabel": "High-value add-on", "oneLineVerdict": "...", "simpleExplanation": "...", "whatMattersMore": ["..."], "whoShouldCare": "...", "bottomLine": "...", "followUps": ["..."], "uncertainty": { "level": "medium", "notes": ["..."] }, "citations": [{ "label": "Source", "url": "optional" }] }',
-      input: {
-        verdictLabel: draft.verdictLabel,
-        oneLineVerdict: draft.oneLineVerdict,
-        simpleExplanation: draft.simpleExplanation,
-        whatMattersMore: draft.whatMattersMore,
-        whoShouldCare: draft.whoShouldCare,
-        bottomLine: draft.bottomLine,
-        followUps: draft.followUps,
-        uncertainty: draft.uncertainty,
-        citations_policy:
-          "Include citations only when making specific numeric claims, strong recommendations, safety-sensitive claims, or contested claims. Otherwise omit citations.",
-        ranked_sources: rankedSources?.ranked_sources ?? [],
-        citation_candidates: draft.citation_candidates,
-        safety,
-      },
-      temperature: 0.2,
-    });
-
-    // Apply safety overrides (if any)
-    const finalAnswer: FinalAnswer = {
-      ...formatted,
-      ...(safety.final_overrides ?? {}),
-    };
-    state.finalAnswer = finalAnswer;
-
-    // Persist final answer best-effort
-    try {
-      if (runId && supabaseUrl && serviceRoleKey) {
-        const url = `${supabaseUrl.replace(/\/+$/, "")}/rest/v1/agent_runs?id=eq.${runId}`;
-        await fetch(url, {
-          method: "PATCH",
-          headers: {
-            apikey: serviceRoleKey,
-            Authorization: `Bearer ${serviceRoleKey}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({ final_answer: finalAnswer, debug: { risk_level: (fitnessGate as any).risk_level } }),
-        }).catch(() => {});
-      }
-    } catch {
-      // ignore
-    }
-
-        send("final", { runId, finalAnswer, debug: { risk_level: (fitnessGate as any).risk_level } });
-        controller.close();
-        return;
-      } catch (err) {
-        const message = (err as Error)?.message ?? String(err);
-        console.log("Pipeline failed:", message);
-        send("error", { runId, message });
-        controller.close();
-        return;
-      }
     },
   });
 
   return sseResponse(stream);
 });
-
