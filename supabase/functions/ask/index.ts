@@ -43,11 +43,8 @@ type AgentState = {
   userQuery: string;
   fitnessGate?: unknown;
   intent?: unknown;
-  plan?: unknown;
   sources?: unknown[];
   claims?: unknown[];
-  beginnerQuestions?: string[];
-  objections?: string[];
   draftAnswer?: unknown;
   finalAnswer?: unknown;
   safety?: unknown;
@@ -160,6 +157,9 @@ function extractFirstJsonValue(text: string): string | null {
   let depth = 0;
   let inString = false;
   let escaped = false;
+  // If the model output is truncated, we still want the largest balanced prefix.
+  // Track the last index where the JSON value was fully closed.
+  let lastCompleteEnd = -1;
   for (let i = start; i < candidate.length; i++) {
     const ch = candidate[i];
     if (inString) {
@@ -179,9 +179,15 @@ function extractFirstJsonValue(text: string): string | null {
     if (ch === openChar) depth++;
     if (ch === closeChar) {
       depth--;
-      if (depth === 0) return candidate.slice(start, i + 1);
+      if (depth === 0) {
+        lastCompleteEnd = i;
+        // If the value ends exactly here, return immediately.
+        return candidate.slice(start, i + 1);
+      }
     }
   }
+  // Truncated/incomplete tail: return the last fully closed value if we saw one.
+  if (lastCompleteEnd !== -1) return candidate.slice(start, lastCompleteEnd + 1);
   return null;
 }
 
@@ -264,15 +270,13 @@ async function callAgentJSON<T extends object>(opts: {
   const jsonText = extractFirstJsonValue(rawText);
   const parsed = jsonText ? safeJsonParse(sanitizeJson(jsonText)) : undefined;
   if (isRecord(parsed)) return { output: parsed as T, rawText };
-  if (Array.isArray(parsed) && opts.agentName === "ClaimExtractor") {
-    return { output: { claims: parsed } as any as T, rawText };
-  }
 
   const repairSystem =
     `You are ${opts.agentName}.\n` +
     "Your previous output was not valid JSON.\n" +
     "Return ONLY valid JSON matching the schema. No markdown.\n" +
-    "Start with `{` and end with `}`. No trailing commas.\n\n" +
+    "Start with `{` and end with `}`. No trailing commas.\n" +
+    "If the previous output is truncated or contains an incomplete last item, DROP the incomplete fragment and return a smaller but valid JSON object that still matches the schema.\n\n" +
     "Schema (hint):\n" +
     opts.outputSchemaHint;
   const repairUser =
@@ -283,44 +287,13 @@ async function callAgentJSON<T extends object>(opts: {
     model: opts.model,
     system: repairSystem,
     user: repairUser,
-    maxTokens: opts.maxTokens ?? 900,
+    // Repair often needs more room than the original (especially if the original was truncated).
+    maxTokens: Math.min(1800, Math.max(1200, (opts.maxTokens ?? 900) * 2)),
     temperature: 0,
   });
   const repairedJsonText = extractFirstJsonValue(repaired);
   const repairedParsed = repairedJsonText ? safeJsonParse(sanitizeJson(repairedJsonText)) : undefined;
   if (!isRecord(repairedParsed)) {
-    // Same array-wrap fallback for ClaimExtractor.
-    if (Array.isArray(repairedParsed) && opts.agentName === "ClaimExtractor") {
-      return { output: { claims: repairedParsed } as any as T, rawText: repaired };
-    }
-    // One extra repair attempt for ClaimExtractor: force a smaller output that fits.
-    if (opts.agentName === "ClaimExtractor") {
-      const repairSystem2 =
-        "You are ClaimExtractor.\n" +
-        "Return ONLY valid JSON. Start with `{` and end with `}`.\n" +
-        "If the previous output was too long, DROP extra items until it is complete.\n" +
-        "No trailing commas.\n\n" +
-        "Schema (hint):\n" +
-        opts.outputSchemaHint;
-      const repairUser2 =
-        "Rewrite the claims list to a maximum of 8 items and ensure the JSON is complete and valid.\n\n" +
-        rawText;
-      const repaired2 = await anthropicMessageText({
-        apiKey: opts.apiKey,
-        model: opts.model,
-        system: repairSystem2,
-        user: repairUser2,
-        maxTokens: opts.maxTokens ?? 900,
-        temperature: 0,
-      });
-      const repaired2JsonText = extractFirstJsonValue(repaired2);
-      const repaired2Parsed = repaired2JsonText ? safeJsonParse(sanitizeJson(repaired2JsonText)) : undefined;
-      if (isRecord(repaired2Parsed)) return { output: repaired2Parsed as T, rawText: repaired2 };
-      if (Array.isArray(repaired2Parsed)) return { output: { claims: repaired2Parsed } as any as T, rawText: repaired2 };
-      const snippet2 = repaired2.slice(0, 4000);
-      throw new Error(`${opts.agentName} did not return valid JSON after repair. RAW_OUTPUT:\n${snippet2}`);
-    }
-
     const snippet = repaired.slice(0, 4000);
     throw new Error(`${opts.agentName} did not return valid JSON after repair. RAW_OUTPUT:\n${snippet}`);
   }
@@ -496,11 +469,19 @@ Deno.serve(async (req) => {
         }
       }
 
-      async function runAgent<T extends object>(args: Parameters<typeof callAgentJSON<T>>[0]) {
-        send("stage", { runId, stage: args.agentName, status: "started" });
+      type RunAgentArgs<T extends object> = Parameters<typeof callAgentJSON<T>>[0] & {
+        stage?: string;
+        emitStages?: boolean;
+      };
+
+      async function runAgent<T extends object>(args: RunAgentArgs<T>) {
+        const stage = args.stage ?? args.agentName;
+        const emitStages = args.emitStages ?? true;
+        if (emitStages) send("stage", { runId, stage, status: "started" });
         const started = Date.now();
         try {
-          const { output, rawText } = await callAgentJSON<T>(args);
+          const { stage: _stage, emitStages: _emitStages, ...callArgs } = args;
+          const { output, rawText } = await callAgentJSON<T>(callArgs);
           await logStep({
             agentName: args.agentName,
             input: args.input,
@@ -508,7 +489,7 @@ Deno.serve(async (req) => {
             status: "ok",
             latencyMs: elapsedMs(started),
           });
-          send("stage", { runId, stage: args.agentName, status: "done" });
+          if (emitStages) send("stage", { runId, stage, status: "done" });
           return output;
         } catch (e) {
           await logStep({
@@ -518,7 +499,7 @@ Deno.serve(async (req) => {
             latencyMs: elapsedMs(started),
             error: (e as Error)?.message ?? String(e),
           });
-          send("stage", { runId, stage: args.agentName, status: "done" });
+          if (emitStages) send("stage", { runId, stage, status: "done" });
           throw e;
         }
       }
@@ -575,6 +556,7 @@ Deno.serve(async (req) => {
       apiKey,
       model,
       agentName: "FitnessGate",
+      stage: "fitness_gate",
       instructions:
         "Classify whether the query is fitness/nutrition related and assign risk level. Block PEDs, extreme dieting, medical diagnosis requests.",
       outputSchemaHint:
@@ -645,40 +627,28 @@ Deno.serve(async (req) => {
     const intent = await runAgent<{
       topic: string;
       intent: string;
-      inferred_goals: string[];
+      goals: string[];
       ambiguities: string[];
       subquestions: string[];
-      personalization: { goal?: string; experience?: string; training_frequency?: string };
+      personalizationHints: { goal?: string; experience?: string; training_frequency?: string };
+      researchPlan: {
+        evidenceThreshold: "low" | "medium" | "high";
+        mandatoryAnswerSections: string[];
+        searchStrategy: string;
+      };
     }>({
       apiKey,
       model,
       agentName: "IntentParser",
-      instructions: "Structure the user question into topic, intent, goals, ambiguities, and subquestions for research.",
+      stage: "intent_parser",
+      instructions:
+        "Structure the user question into topic, intent, goals, ambiguities, subquestions, personalizationHints, and a researchPlan that guides downstream research and answer structure.",
       outputSchemaHint:
-        '{ "topic": "creatine", "intent": "importance", "inferred_goals": ["muscle gain"], "ambiguities": ["user goal unclear"], "subquestions": ["Does creatine help strength?"], "personalization": { "goal": "muscle gain", "experience": "beginner", "training_frequency": "3x/week" } }',
+        '{ "topic": "creatine", "intent": "importance", "goals": ["muscle gain"], "ambiguities": ["user goal unclear"], "subquestions": ["Does creatine help strength?"], "personalizationHints": { "goal": "muscle gain", "experience": "beginner", "training_frequency": "3x/week" }, "researchPlan": { "evidenceThreshold": "medium", "mandatoryAnswerSections": ["verdictLabel","oneLineVerdict","simpleExplanation","whatMattersMore","whoShouldCare","bottomLine","followUps","uncertainty"], "searchStrategy": "Prefer meta-analyses/position stands; note practical relevance and limitations; avoid overclaiming." } }',
       input: { userQuery: question, fitnessGate },
       temperature: 0.2,
     });
     state.intent = intent;
-
-    // 3) Planner
-    const plan = await runAgent<{
-      research_plan: string[];
-      evidence_threshold: "low" | "medium" | "high";
-      answer_structure: string[];
-      must_include: string[];
-    }>({
-      apiKey,
-      model,
-      agentName: "Planner",
-      instructions:
-        "Create a research plan and define what evidence is needed. Define answer structure following the mandatory UI sections.",
-      outputSchemaHint:
-        '{ "research_plan": ["Find strongest evidence", "Find practical relevance", "Find limitations"], "evidence_threshold": "medium", "answer_structure": ["Verdict", "Explanation", "What matters more", "Who should care", "Bottom line", "Follow-ups"], "must_include": ["uncertainty", "safety"] }',
-      input: { userQuery: question, fitnessGate, intent },
-      temperature: 0.2,
-    });
-    state.plan = plan;
 
     // 4) Research cache lookup (best-effort). If unavailable, fall back to running researchers.
     const topicKey = String((intent as any).topic ?? "").trim().toLowerCase();
@@ -695,7 +665,7 @@ Deno.serve(async (req) => {
     let limitations: LimitationsOut | null = null;
     let rankedSources: RankedOut | null = null;
 
-    send("stage", { runId, stage: "ResearchCache", status: "started" });
+    send("stage", { runId, stage: "cache_lookup", status: "started" });
     try {
       if (supabaseUrl && serviceRoleKey && topicKey) {
         const nowIso = new Date().toISOString();
@@ -735,54 +705,70 @@ Deno.serve(async (req) => {
     } catch (e) {
       console.log("research_cache lookup failed:", (e as Error)?.message ?? e);
     }
-    send("stage", { runId, stage: "ResearchCache", status: "done", summary: evidence ? "hit" : "miss" });
+    send("stage", { runId, stage: "cache_lookup", status: "done", summary: evidence ? "hit" : "miss" });
+
+    // Maintain SSE stage sequence even on cache hits (no extra work performed).
+    if (evidence && practical && limitations) {
+      send("stage", { runId, stage: "researchers", status: "started" });
+      send("stage", { runId, stage: "researchers", status: "done", summary: "cache" });
+    }
+    if (rankedSources) {
+      send("stage", { runId, stage: "source_ranker", status: "started" });
+      send("stage", { runId, stage: "source_ranker", status: "done", summary: "cache" });
+    }
 
     if (!evidence || !practical || !limitations) {
       // 4) Parallel Researchers
+      send("stage", { runId, stage: "researchers", status: "started" });
       const out = await Promise.all([
         runAgent<EvidenceOut>({
           apiKey,
           model,
           agentName: "EvidenceResearcher",
+          emitStages: false,
           instructions:
             "Find the highest-quality evidence (meta-analyses, systematic reviews, position stands) relevant to the question. Output findings and sources.",
           outputSchemaHint:
             '{ "findings": ["Conservative evidence-based summary..."], "sources": [{ "label": "Author et al. (Year) Journal", "type": "meta-analysis", "url": "optional" }] }',
-          input: { userQuery: question, intent, plan },
+          input: { userQuery: question, intent, researchPlan: (intent as any).researchPlan },
           temperature: 0.2,
         }),
         runAgent<PracticalOut>({
           apiKey,
           model,
           agentName: "PracticalContextResearcher",
+          emitStages: false,
           instructions:
             "Translate the question into real-world importance and prioritization (fundamentals > supplements). Return practical notes, not final prose.",
           outputSchemaHint:
             '{ "findings": ["What matters in practice..."], "practical_notes": ["Implementation note..."] }',
-          input: { userQuery: question, intent, fitnessGate },
+          input: { userQuery: question, intent, fitnessGate, researchPlan: (intent as any).researchPlan },
           temperature: 0.3,
         }),
         runAgent<LimitationsOut>({
           apiKey,
           model,
           agentName: "LimitationsResearcher",
+          emitStages: false,
           instructions:
             "List caveats, edge cases, and safety flags. Be conservative and explicit about uncertainty or mixed evidence.",
           outputSchemaHint:
             '{ "caveats": ["Evidence is mixed on..."], "edge_cases": ["If training status is..."], "safety_flags": ["Kidney disease is a contraindication for..."] }',
-          input: { userQuery: question, intent, fitnessGate },
+          input: { userQuery: question, intent, fitnessGate, researchPlan: (intent as any).researchPlan },
           temperature: 0.2,
         }),
       ]);
       evidence = out[0];
       practical = out[1];
       limitations = out[2];
+      send("stage", { runId, stage: "researchers", status: "done" });
 
       // 5) SourceRanker
       rankedSources = await runAgent<RankedOut>({
         apiKey,
         model,
         agentName: "SourceRanker",
+        stage: "source_ranker",
         instructions:
           "Rank sources with priority: meta-analyses > systematic reviews > position stands > primary studies > reputable summaries. Output a ranked list with scores.",
         outputSchemaHint:
@@ -819,67 +805,26 @@ Deno.serve(async (req) => {
 
     state.sources = rankedSources?.ranked_sources ?? [];
 
-    // 6) ClaimExtractor
-    const claims = await runAgent<{
-      claims: { claim: string; confidence: "low" | "medium" | "high"; source_labels: string[] }[];
+    // 6) ClaimVerifier (extract + verify in one pass)
+    const claimVerification = await runAgent<{
+      verifiedClaims: { claim: string; confidence: "low" | "medium" | "high"; sourceLabel: string }[];
+      removedClaims: { claim: string; reason: string }[];
     }>({
       apiKey,
       model,
-      agentName: "ClaimExtractor",
+      agentName: "ClaimVerifier",
+      stage: "claim_verifier",
       instructions:
-        "Convert findings into atomic, conservatively worded claims. Each claim must cite source labels. No narrative. Return a maximum of 8 claims.",
+        "Given researcher outputs and ranked sources, extract atomic conservatively worded claims AND in the same pass remove or soften any claim that lacks direct source support. Output verifiedClaims (max 8, each with a single sourceLabel) and removedClaims. No narrative.",
       outputSchemaHint:
-        '{ "claims": [{ "claim": "Atomic claim...", "confidence": "medium", "source_labels": ["Author (Year)"] }] }',
+        '{ "verifiedClaims": [{ "claim": "Atomic claim...", "confidence": "medium", "sourceLabel": "Author (Year)" }], "removedClaims": [{ "claim": "Claim removed", "reason": "Not directly supported by the ranked sources provided." }] }',
       input: { evidence, practical, limitations, rankedSources, intent },
       temperature: 0,
       maxTokens: 1200,
     });
-    state.claims = claims.claims;
+    state.claims = claimVerification.verifiedClaims;
 
-    // 7) CitationVerifier
-    const verifiedClaims = await runAgent<{
-      verified_claims: { claim: string; confidence: "low" | "medium" | "high"; source_labels: string[]; notes?: string }[];
-      removed_claims: { claim: string; reason: string }[];
-    }>({
-      apiKey,
-      model,
-      agentName: "CitationVerifier",
-      instructions:
-        "Ensure claims match sources. Remove unsupported claims and downgrade exaggerated wording. Keep only what can be defended.",
-      outputSchemaHint:
-        '{ "verified_claims": [{ "claim": "Claim", "confidence": "medium", "source_labels": ["Source"], "notes": "optional" }], "removed_claims": [{ "claim": "Claim", "reason": "why removed" }] }',
-      input: { claims: claims.claims, ranked_sources: rankedSources?.ranked_sources ?? [] },
-      temperature: 0,
-    });
-    state.claims = verifiedClaims.verified_claims;
-
-    // 8) Parallel Reasoning (Novice + Skeptic)
-    const [novice, skeptic] = await Promise.all([
-      runAgent<{ beginner_questions: string[] }>({
-        apiKey,
-        model,
-        agentName: "NoviceAgent",
-        instructions:
-          "Simulate a beginner reading the verified claims. Ask simple clarification questions and point out confusion risks.",
-        outputSchemaHint: '{ "beginner_questions": ["Question 1", "Question 2"] }',
-        input: { userQuery: question, verified_claims: verifiedClaims.verified_claims },
-        temperature: 0.4,
-      }),
-      runAgent<{ objections: string[]; prioritization_push: string[] }>({
-        apiKey,
-        model,
-        agentName: "SkepticAgent",
-        instructions:
-          "Challenge reasoning: detect overstatements, force prioritization, identify missing comparisons, and call out tradeoffs.",
-        outputSchemaHint: '{ "objections": ["Objection 1"], "prioritization_push": ["What matters more: ..."] }',
-        input: { userQuery: question, verified_claims: verifiedClaims.verified_claims, intent },
-        temperature: 0.2,
-      }),
-    ]);
-    state.beginnerQuestions = novice.beginner_questions;
-    state.objections = skeptic.objections;
-
-    // 9) TeacherWriter (structured explanation draft; still not final UI text)
+    // 7) TeacherWriter (final draft; no simplification pass)
     const draft = await runAgent<{
       verdictLabel: AnswerVerdictLabel;
       oneLineVerdict: string;
@@ -887,6 +832,7 @@ Deno.serve(async (req) => {
       whatMattersMore: string[];
       whoShouldCare: string;
       bottomLine: string;
+      followUps: string[];
       uncertainty: { level: "low" | "medium" | "high"; notes: string[] };
       citations_needed: boolean;
       citation_candidates: string[];
@@ -895,41 +841,22 @@ Deno.serve(async (req) => {
       model,
       agentName: "TeacherWriter",
       instructions:
-        "Write the answer sections using ONLY verified claims. Be simple, decisive, and prioritized. Include uncertainty/tradeoffs. Do not add new facts.",
+        'Write the answer sections using ONLY verified claims. Be simple, decisive, and prioritized. Include uncertainty/tradeoffs. Do not add new facts. Write in plain language. Be concise and actionable. Do not use jargon. Your first draft is your final draft — do not leave anything that needs simplification. Keep arrays short: whatMattersMore max 6 items; followUps max 5 items; citation_candidates max 6 items, each under 120 characters.',
       outputSchemaHint:
-        '{ "verdictLabel": "High-value add-on", "oneLineVerdict": "...", "simpleExplanation": "...", "whatMattersMore": ["..."], "whoShouldCare": "...", "bottomLine": "...", "uncertainty": { "level": "medium", "notes": ["..."] }, "citations_needed": true, "citation_candidates": ["Source label"] }',
+        '{ "verdictLabel": "High-value add-on", "oneLineVerdict": "...", "simpleExplanation": "...", "whatMattersMore": ["..."], "whoShouldCare": "...", "bottomLine": "...", "followUps": ["..."], "uncertainty": { "level": "medium", "notes": ["..."] }, "citations_needed": true, "citation_candidates": ["Source label"] }',
       input: {
         userQuery: question,
         intent,
-        verified_claims: verifiedClaims.verified_claims,
-        skeptic,
-        novice,
+        verifiedClaims: claimVerification.verifiedClaims,
+        removedClaims: claimVerification.removedClaims,
       },
       temperature: 0.4,
+      maxTokens: 1600,
+      stage: "teacher_writer",
     });
     state.draftAnswer = draft;
 
-    // 10) RewriterSimplifier
-    const simplified = await runAgent<{
-      oneLineVerdict: string;
-      simpleExplanation: string;
-      whatMattersMore: string[];
-      whoShouldCare: string;
-      bottomLine: string;
-      followUps: string[];
-    }>({
-      apiKey,
-      model,
-      agentName: "RewriterSimplifier",
-      instructions:
-        "Make the drafted answer shorter, simpler, more memorable, more actionable. Keep meaning intact and avoid fluff.",
-      outputSchemaHint:
-        '{ "oneLineVerdict": "...", "simpleExplanation": "...", "whatMattersMore": ["..."], "whoShouldCare": "...", "bottomLine": "...", "followUps": ["..."] }',
-      input: { draft, beginner_questions: novice.beginner_questions },
-      temperature: 0.5,
-    });
-
-    // 11) SafetyPolicyAgent
+    // 8) SafetyPolicyAgent
     const safety = await runAgent<{
       allowed: boolean;
       modifications: string[];
@@ -939,11 +866,12 @@ Deno.serve(async (req) => {
       apiKey,
       model,
       agentName: "SafetyPolicyAgent",
+      stage: "safety_policy",
       instructions:
         "Enforce fitness safety: block PED guidance, extreme dieting, injury misuse, and medical diagnosis. Modify unsafe sections and add safety notes as needed.",
       outputSchemaHint:
         '{ "allowed": true, "modifications": ["..."], "safety_notes": ["..."], "final_overrides": { "bottomLine": "optional override" } }',
-      input: { userQuery: question, risk_level: (fitnessGate as any).risk_level, draft, simplified },
+      input: { userQuery: question, risk_level: (fitnessGate as any).risk_level, draft },
       temperature: 0,
     });
     state.safety = safety;
@@ -966,23 +894,24 @@ Deno.serve(async (req) => {
       return;
     }
 
-    // 12) ResponseFormatter (final UI-ready JSON)
+    // 9) ResponseFormatter (final UI-ready JSON)
     const formatted = await runAgent<FinalAnswer>({
       apiKey,
       model,
       agentName: "ResponseFormatter",
+      stage: "response_formatter",
       instructions:
         "Produce the final UI-ready JSON in the mandatory answer structure. Use only the simplified text plus safety constraints. Add citations only if needed.",
       outputSchemaHint:
         '{ "verdictLabel": "High-value add-on", "oneLineVerdict": "...", "simpleExplanation": "...", "whatMattersMore": ["..."], "whoShouldCare": "...", "bottomLine": "...", "followUps": ["..."], "uncertainty": { "level": "medium", "notes": ["..."] }, "citations": [{ "label": "Source", "url": "optional" }] }',
       input: {
         verdictLabel: draft.verdictLabel,
-        oneLineVerdict: simplified.oneLineVerdict,
-        simpleExplanation: simplified.simpleExplanation,
-        whatMattersMore: simplified.whatMattersMore,
-        whoShouldCare: simplified.whoShouldCare,
-        bottomLine: simplified.bottomLine,
-        followUps: simplified.followUps,
+        oneLineVerdict: draft.oneLineVerdict,
+        simpleExplanation: draft.simpleExplanation,
+        whatMattersMore: draft.whatMattersMore,
+        whoShouldCare: draft.whoShouldCare,
+        bottomLine: draft.bottomLine,
+        followUps: draft.followUps,
         uncertainty: draft.uncertainty,
         citations_policy:
           "Include citations only when making specific numeric claims, strong recommendations, safety-sensitive claims, or contested claims. Otherwise omit citations.",

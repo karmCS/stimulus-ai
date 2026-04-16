@@ -232,6 +232,8 @@ const ChatMain = ({ sidebarCollapsed, onToggleSidebar, activeId }: Props) => {
             onSend={handleSend}
             initialValue={composerValue}
             onValueChange={setComposerValue}
+            isThinking={isThinking}
+            isStreaming={isStreaming}
           />
         </>
       ) : (
@@ -403,7 +405,7 @@ const ChatMain = ({ sidebarCollapsed, onToggleSidebar, activeId }: Props) => {
             </div>
           </div>
 
-          <Composer onSend={handleSend} />
+          <Composer onSend={handleSend} isThinking={isThinking} isStreaming={isStreaming} />
         </>
       )}
     </div>

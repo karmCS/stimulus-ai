@@ -5,6 +5,8 @@ interface ComposerProps {
   onSend: (text: string) => void;
   initialValue?: string;
   onValueChange?: (value: string) => void;
+  isThinking?: boolean;
+  isStreaming?: boolean;
   error?: boolean;
   onRetry?: () => void;
 }
@@ -13,7 +15,15 @@ const LINE_HEIGHT = 22;
 const MIN_ROWS = 1;
 const MAX_ROWS = 6;
 
-const Composer = ({ onSend, initialValue, onValueChange, error, onRetry }: ComposerProps) => {
+const Composer = ({
+  onSend,
+  initialValue,
+  onValueChange,
+  isThinking = false,
+  isStreaming = false,
+  error,
+  onRetry,
+}: ComposerProps) => {
   const [value, setValue] = useState(initialValue ?? "");
   const [sending, setSending] = useState(false);
   const [isOverflowing, setIsOverflowing] = useState(false);
@@ -53,10 +63,12 @@ const Composer = ({ onSend, initialValue, onValueChange, error, onRetry }: Compo
     onValueChange?.("");
   };
 
-  const handleKeyDown = (e: React.KeyboardEvent) => {
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      handleSend();
+      if (!isThinking && !isStreaming && value.trim()) {
+        handleSend();
+      }
     }
   };
 
